@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Bloxd Replay Editor</title>
+<style>
+  html, body { margin:0; height:100%; background:#0d0d10; color:#eee; font-family: sans-serif; overflow:hidden; }
+
+  /* --- アップロード画面 --- */
+  #uploadScreen { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:16px; z-index:20; }
+  #uploadScreen.hidden { display:none; }
+  #uploadBox { background:#1a1a20; padding:32px 40px; border-radius:12px; text-align:center; max-width:420px; }
+  #uploadBox h1 { font-size:20px; margin-bottom:8px; }
+  #uploadBox p { color:#999; font-size:13px; margin-bottom:20px; }
+  #uploadBox input[type=file] { color:#ccc; margin-bottom:16px; display:block; width:100%; }
+  #processBtn { padding:12px 24px; border-radius:6px; border:none; background:#3498db; color:white; font-size:15px; cursor:pointer; width:100%; }
+  #processBtn:disabled { background:#555; cursor:not-allowed; }
+  #uploadStatus { margin-top:14px; font-size:13px; color:#aaa; min-height: 18px; }
+  #apiUrlRow { margin-top: 18px; font-size: 11px; color: #666; }
+  #apiUrlRow input { width: 100%; font-size: 11px; padding: 4px; margin-top: 4px; background:#111; border:1px solid #333; color:#999; border-radius:4px; }
+
+  /* --- エディタ画面 --- */
+  #editor { position:fixed; inset:0; display:none; }
+  #editor.active { display:block; }
+  #info { position:fixed; top:8px; left:8px; z-index:10; color:#ccc; font-size:13px;
+          background:rgba(0,0,0,0.6); padding:6px 10px; border-radius:6px; }
+  #tooltip { position:fixed; z-index:10; background:#1a1a1e; color:#eee; padding:6px 10px;
+             border-radius:6px; font-size:13px; pointer-events:none; display:none; }
+  #viewport { position:absolute; top:0; left:0; right:0; bottom:70px; overflow:hidden; cursor:grab; }
+  #viewport.dragging { cursor:grabbing; }
+  canvas { image-rendering: pixelated; position:absolute; transform-origin: 0 0; }
+  #playerCanvas { pointer-events: none; }
+  #bar { position:fixed; left:0; right:0; bottom:0; height:70px; background:#181820;
+         border-top:1px solid #333; display:flex; align-items:center; padding:0 16px; gap:12px; }
+  #playBtn { padding:10px 18px; border-radius:6px; border:none; background:#3498db; color:white; cursor:pointer; font-size:14px; }
+  #scrub { flex:1; }
+  #frameInfo { color:#aaa; font-size:12px; white-space:nowrap; min-width:340px; }
+  #entitySelect { background:#222; color:#eee; border:1px solid #444; border-radius:6px; padding:8px; font-size:13px; max-width: 220px; }
+  .topBtn { position:fixed; top:8px; z-index:10; padding:8px 14px; border-radius:6px; border:none; cursor:pointer; font-size:13px; color:white; }
+</style>
+</head>
+<body>
+
+<div id="uploadScreen">
+  <div id="uploadBox">
+    <h1>Bloxd Replay Editor</h1>
+    <p>.bloxdreplay ファイルをアップロードすると、2.5D表示・タイムライン再生ができます。</p>
+    <input type="file" id="fileInput" accept=".bloxdreplay">
+    <button id="processBtn">読み込む</button>
+    <div id="uploadStatus"></div>
+    <div id="apiUrlRow">
+      解析サーバーURL:
+      <input type="text" id="apiUrlInput" value="https://YOUR-SPACE-NAME.hf.space">
+    </div>
+  </div>
+</div>
+
+<div id="editor">
+  <div id="info">-</div>
+  <div id="tooltip"></div>
+
+  <button id="fitBtn" class="topBtn" style="right:150px; background:#555;">全体表示に戻す</button>
+  <button id="gotoBtn" class="topBtn" style="right:290px; background:#e67e22;">📍 プレイヤーへ移動</button>
+  <button id="fovBtn" class="topBtn" style="right:8px; top:44px; background:#9b59b6;">👁 プレイヤー視点(軽量)に切替</button>
+
+  <div id="viewport">
+    <canvas id="mapCanvas"></canvas>
+    <canvas id="playerCanvas"></canvas>
+  </div>
+  <div id="bar">
+    <button id="playBtn">▶ 再生</button>
+    <input type="range" id="scrub" min="0" max="0" value="0">
+    <select id="entitySelect"></select>
+    <div id="frameInfo">-</div>
+  </div>
+</div>
+
+<!-- 表示の計算(座標変換・描画)は renderer.js、UI(アップロード・操作)は ui.js -->
+<script src="renderer.js"></script>
+<script src="ui.js"></script>
+</body>
+</html>
