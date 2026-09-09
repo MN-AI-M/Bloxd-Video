@@ -40,17 +40,6 @@ export function initUI() {
   });
 }
 
-function loadReplayFile(file) {
-  document.getElementById('introScreen').classList.add('hidden');
-  document.getElementById('processingOverlay').classList.remove('hidden');
-
-  // ダミーの読み込み（実際にはバックエンドAPIと通信）
-  setTimeout(() => {
-    document.getElementById('processingOverlay').classList.add('hidden');
-    document.getElementById('topNav').classList.remove('hidden');
-    document.getElementById('editorScreen').classList.remove('hidden');
-  }, 1200);
-}
 
 
 async function processFile(file) {
