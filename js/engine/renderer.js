@@ -37,7 +37,7 @@ let curTick = 0;
 // 初期化
 // ============================================================
 
-function setRendererData(newTiles) {
+export function setRendererData(newTiles) {
   tiles = newTiles;
 
   const certainTiles = tiles.filter(t => !t.uncertain);
@@ -59,12 +59,12 @@ function setRendererData(newTiles) {
   for (const t of tiles) tileIndex.set((t.x - minX) + '_' + (t.z - minZ), t);
 }
 
-function setRendererTimeline(newTimeline) {
+export function setRendererTimeline(newTimeline) {
   timeline = newTimeline;
   curTick = 0;
 }
 
-function initCanvases() {
+export function initCanvases() {
   canvas = document.getElementById('mapCanvas');
   ctx = canvas.getContext('2d');
   ctx.imageSmoothingEnabled = false;
@@ -234,7 +234,7 @@ function applyTransform() {
   playerCanvas.style.transform = t;
 }
 
-function fitToView() {
+export function fitToView() {
   const viewport = document.getElementById('viewport');
   const vw = viewport.clientWidth, vh = viewport.clientHeight;
   if (!canvas || canvas.width === 0 || canvas.height === 0) return;
