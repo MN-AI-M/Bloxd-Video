@@ -30,13 +30,13 @@ export function initUI() {
   // ドラッグ＆ドロップイベント
   selectFileBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', (e) => {
-    if (e.target.files.length) loadReplayFile(e.target.files[0]);
+    if (e.target.files.length) processFile(e.target.files[0]); // loadReplayFile から processFileに変更
   });
 
   dropZone.addEventListener('dragover', (e) => e.preventDefault());
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
-    if (e.dataTransfer.files.length) loadReplayFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files.length) processFile(e.dataTransfer.files[0]); // loadReplayFile から processFileに変更
   });
 }
 
