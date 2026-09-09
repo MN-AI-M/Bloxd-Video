@@ -1,0 +1,88 @@
+/* ============================================================
+   Editor UI
+   ============================================================ */
+
+.main-screen {
+  position: fixed;
+  top: 60px;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+}
+
+.viewport-container {
+  flex: 1;
+  position: relative;
+  background: #020617;
+  overflow: hidden;
+}
+
+/* サイドパネル */
+.editor-side-panel {
+  width: 280px;
+  background: var(--bg-card);
+  border-left: 1px solid var(--border-color);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.section-label {
+  font-size: 0.85rem;
+  color: var(--text-sub);
+}
+
+.stats-grid {
+  background: var(--bg-main);
+  padding: 12px;
+  border-radius: 8px;
+  gap: 8px;
+}
+
+.stat-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.9rem;
+}
+
+.stat-item strong {
+  font-family: var(--font-mono);
+  color: var(--accent-primary);
+}
+
+/* タイムライン */
+.editor-timeline {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 280px;
+  height: 80px;
+  background: rgba(30, 41, 59, 0.95);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+  gap: 20px;
+  backdrop-filter: blur(8px);
+}
+
+.timeline-slider {
+  flex: 1;
+  height: 8px;
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+}
+
+.time-readout {
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  color: var(--accent-primary);
+}
