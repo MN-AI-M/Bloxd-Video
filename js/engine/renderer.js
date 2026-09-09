@@ -389,3 +389,29 @@ export function initRendererInteractions() {
   setupPanZoom();
   setupHover();
 }
+
+// 時間やフレームのUIを更新するための関数
+function updateFrameInfo(frame) {
+  // タイムラインが存在しない場合は無視
+  if (!timeline || !timeline.frames || timeline.frames.length === 0) return;
+
+  // 60fpsと仮定して秒数を計算
+  const currentSec = curTick / 60;
+  const totalSec = timeline.frames.length / 60;
+
+  // 00:00.0 形式にする関数
+  const formatTime = (sec) => {
+    const m = Math.floor(sec / 60).toString().padStart(2, '0');
+    const s = (sec % 60).toFixed(1).padStart(4, '0');
+    return `${m}:${s}`;
+  };
+
+  // 画面右下の時間表示テキストを更新（※HTMLの構造に合わせて適宜変更してください）
+  const timeDisplay = document.querySelector('.time-display') || document.querySelector('[text*="00:00.0"]');
+  if (timeDisplay) {
+    timeDisplay.innerText = `${formatTime(currentSec)} / ${formatTime(totalSec)}`;
+  }
+}
+
+// 外部からこの関数を呼べるようにする
+window.updateFrameInfo = updateFrameInfo;
