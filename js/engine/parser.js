@@ -55,16 +55,17 @@ export async function parseReplayFile(file, onProgress) {
   // Python側に用意されている「from_decoded」関数を活用し、I/O無しで一気に処理
   const pyCode = `
 import json
+print("Python: デコード開始")
 from bloxdreplay_decode_full import make_decoder
 from build_2d_map import build_map_from_decoded
 from build_all_timelines import build_all_timelines_from_decoded
 
-# 1. 録画ファイルをデコード
 res = make_decoder('temp.bloxdreplay')
-
-# 2. Pyodide用の関数でI/O無しでデータ構築
+print("Python: デコード完了、マップ構築中...")
 map_data = build_map_from_decoded(res, 'block_id_to_root.csv', 'asset_master.csv')
+print("Python: マップ構築完了、タイムライン構築中...")
 timeline_data = build_all_timelines_from_decoded(res)
+print("Python: すべての構築完了、JSON化します")
 
 output = {
     'map': map_data,
