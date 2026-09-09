@@ -82,6 +82,14 @@ async function processFile(file) {
     setRendererData(mappedTiles);
     setRendererTimeline(timelineData);
     initCanvases();
+    
+    // ▼ ここを追加：マウス操作やホバー機能を有効化する
+    import('../engine/renderer.js').then(r => {
+      if (typeof r.initRendererInteractions === 'function') {
+        r.initRendererInteractions();
+      }
+    });
+
     drawIso();
     fitToView();
 
