@@ -1,82 +1,228 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="utf-8">
-<title>Bloxd Replay Editor</title>
-<style>
-  html, body { margin:0; height:100%; background:#0d0d10; color:#eee; font-family: sans-serif; overflow:hidden; }
-
-  /* --- アップロード画面 --- */
-  #uploadScreen { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:16px; z-index:20; }
-  #uploadScreen.hidden { display:none; }
-  #uploadBox { background:#1a1a20; padding:32px 40px; border-radius:12px; text-align:center; max-width:420px; }
-  #uploadBox h1 { font-size:20px; margin-bottom:8px; }
-  #uploadBox p { color:#999; font-size:13px; margin-bottom:20px; }
-  #uploadBox input[type=file] { color:#ccc; margin-bottom:16px; display:block; width:100%; }
-  #processBtn { padding:12px 24px; border-radius:6px; border:none; background:#3498db; color:white; font-size:15px; cursor:pointer; width:100%; }
-  #processBtn:disabled { background:#555; cursor:not-allowed; }
-  #uploadStatus { margin-top:14px; font-size:13px; color:#aaa; min-height: 18px; }
-  #apiUrlRow { margin-top: 18px; font-size: 11px; color: #666; }
-  #apiUrlRow input { width: 100%; font-size: 11px; padding: 4px; margin-top: 4px; background:#111; border:1px solid #333; color:#999; border-radius:4px; }
-
-  /* --- エディタ画面 --- */
-  #editor { position:fixed; inset:0; display:none; }
-  #editor.active { display:block; }
-  #info { position:fixed; top:8px; left:8px; z-index:10; color:#ccc; font-size:13px;
-          background:rgba(0,0,0,0.6); padding:6px 10px; border-radius:6px; }
-  #tooltip { position:fixed; z-index:10; background:#1a1a1e; color:#eee; padding:6px 10px;
-             border-radius:6px; font-size:13px; pointer-events:none; display:none; }
-  #viewport { position:absolute; top:0; left:0; right:0; bottom:70px; overflow:hidden; cursor:grab; }
-  #viewport.dragging { cursor:grabbing; }
-  canvas { image-rendering: pixelated; position:absolute; transform-origin: 0 0; }
-  #playerCanvas { pointer-events: none; }
-  #bar { position:fixed; left:0; right:0; bottom:0; height:70px; background:#181820;
-         border-top:1px solid #333; display:flex; align-items:center; padding:0 16px; gap:12px; }
-  #playBtn { padding:10px 18px; border-radius:6px; border:none; background:#3498db; color:white; cursor:pointer; font-size:14px; }
-  #scrub { flex:1; }
-  #frameInfo { color:#aaa; font-size:12px; white-space:nowrap; min-width:340px; }
-  #entitySelect { background:#222; color:#eee; border:1px solid #444; border-radius:6px; padding:8px; font-size:13px; max-width: 220px; }
-  .topBtn { position:fixed; top:8px; z-index:10; padding:8px 14px; border-radius:6px; border:none; cursor:pointer; font-size:13px; color:white; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bloxd Replay Studio - リプレイ動画編集・解析ツール</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
 </head>
 <body>
 
-<div id="uploadScreen">
-  <div id="uploadBox">
-    <h1>Bloxd Replay Editor</h1>
-    <p>.bloxdreplay ファイルをアップロードすると、2.5D表示・タイムライン再生ができます。</p>
-    <input type="file" id="fileInput" accept=".bloxdreplay">
-    <button id="processBtn">読み込む</button>
-    <div id="uploadStatus"></div>
-    <div id="apiUrlRow">
-      解析サーバーURL:
-      <input type="text" id="apiUrlInput" value="https://YOUR-SPACE-NAME.hf.space">
+  <!-- ==================== 1. 起動時ローディング画面 ==================== -->
+  <div id="loadingScreen" class="screen-overlay active">
+    <div class="loader-content">
+      <div class="logo-badge">
+        <span class="logo-icon">🎮</span>
+        <span class="logo-text">BLOXD<span class="accent">STUDIO</span></span>
+      </div>
+      <div class="spinner-container">
+        <div class="cyber-spinner"></div>
+      </div>
+      <p id="loadingTip" class="loading-tip">システムを初期化中...</p>
+      <div class="progress-bar-wrap">
+        <div id="loadingProgress" class="progress-bar-fill"></div>
+      </div>
     </div>
   </div>
-</div>
 
-<div id="editor">
-  <div id="info">-</div>
-  <div id="tooltip"></div>
+  <!-- ==================== 2. 説明 & ファイル選択画面 ==================== -->
+  <div id="introScreen" class="screen-overlay hidden">
+    <header class="landing-header">
+      <div class="logo-badge">
+        <span class="logo-icon">🎬</span>
+        <span class="logo-text">BLOXD<span class="accent">REPLAY STUDIO</span></span>
+      </div>
+      <div class="badge-tag">v2.0 Cinematic Edition</div>
+    </header>
 
-  <button id="fitBtn" class="topBtn" style="right:150px; background:#555;">全体表示に戻す</button>
-  <button id="gotoBtn" class="topBtn" style="right:290px; background:#e67e22;">📍 プレイヤーへ移動</button>
-  <button id="fovBtn" class="topBtn" style="right:8px; top:44px; background:#9b59b6;">👁 プレイヤー視点(軽量)に切替</button>
+    <main class="landing-container">
+      <div class="hero-section">
+        <h1 class="hero-title">リプレイ動画を、<br><span class="gradient-text">最高の一瞬</span>に創り変えよう</h1>
+        <p class="hero-desc">
+          Bloxd.ioの <code class="code-tag">.bloxdreplay</code> ファイルをドラッグ＆ドロップするだけ。<br>
+          2.5Dカメラやプレイヤー追従で、あなただけのシネマティック映像を作成できます。
+        </p>
 
-  <div id="viewport">
-    <canvas id="mapCanvas"></canvas>
-    <canvas id="playerCanvas"></canvas>
+        <!-- ドラッグ＆ドロップエリア -->
+        <div id="dropZone" class="drop-zone">
+          <div class="drop-zone-content">
+            <div class="drop-icon-wrap">
+              <i data-lucide="upload-cloud" class="drop-icon"></i>
+            </div>
+            <h3>リプレイファイルをここにドロップ</h3>
+            <p>またはファイルを選択してください</p>
+            <input type="file" id="fileInput" accept=".bloxdreplay" class="file-input-hidden">
+            <button id="selectFileBtn" class="btn btn-primary btn-glow">
+              <i data-lucide="file-plus"></i> ファイルを選択
+            </button>
+          </div>
+        </div>
+
+        <!-- サーバー接続設定 -->
+        <div class="server-config-card">
+          <details>
+            <summary><i data-lucide="settings"></i> 解析サーバーURL設定 (必要な場合)</summary>
+            <div class="server-input-group">
+              <input type="text" id="apiUrlInput" value="https://YOUR-SPACE-NAME.hf.space" placeholder="https://your-api.hf.space">
+            </div>
+          </details>
+        </div>
+      </div>
+
+      <!-- 初心者安心の使い方ガイド -->
+      <section class="guide-section">
+        <h2 class="section-title"><i data-lucide="sparkles"></i> 3ステップでカンタンスタート</h2>
+        <div class="guide-cards">
+          <div class="guide-card">
+            <div class="step-num">01</div>
+            <div class="card-icon"><i data-lucide="download"></i></div>
+            <h4>Bloxdで録画をダウンロード</h4>
+            <p>ゲーム内のリプレイアプデ画面から <code class="code-tag">.bloxdreplay</code> を保存します。</p>
+          </div>
+          <div class="guide-card">
+            <div class="step-num">02</div>
+            <div class="card-icon"><i data-lucide="file-check"></i></div>
+            <h4>このサイトにドロップ</h4>
+            <p>ファイルを選択するか、上のドロップエリアに引きずり込みます。</p>
+          </div>
+          <div class="guide-card">
+            <div class="step-num">03</div>
+            <div class="card-icon"><i data-lucide="video"></i></div>
+            <h4>シネマティック再生！</h4>
+            <p>カメラワーク調整・プレイヤー追従・スロー再生で最高のシーンを演出！</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="landing-footer">
+      <p>© Bloxd Replay Studio - Open Source Replay Viewer & Cinematic Editor</p>
+    </footer>
   </div>
-  <div id="bar">
-    <button id="playBtn">▶ 再生</button>
-    <input type="range" id="scrub" min="0" max="0" value="0">
-    <select id="entitySelect"></select>
-    <div id="frameInfo">-</div>
-  </div>
-</div>
 
-<!-- 表示の計算(座標変換・描画)は renderer.js、UI(アップロード・操作)は ui.js -->
-<script src="renderer.js"></script>
-<script src="ui.js"></script>
+  <!-- ==================== 3. 解析処理中オーバーレイ ==================== -->
+  <div id="processingOverlay" class="screen-overlay hidden">
+    <div class="loader-content">
+      <div class="cyber-spinner"></div>
+      <h3 id="processStatusTitle">リプレイデータを解析中...</h3>
+      <p id="uploadStatus" class="status-desc">地形RLEおよびタイムラインデータをデコードしています</p>
+    </div>
+  </div>
+
+  <!-- ==================== 4. メインエディタ画面 ==================== -->
+  <div id="editor" class="editor-container hidden">
+    <!-- 上部ヘッダーバー -->
+    <header class="editor-header">
+      <div class="header-left">
+        <div class="logo-badge mini">
+          <span class="logo-icon">🎬</span>
+          <span class="logo-text">BLOXD<span class="accent">STUDIO</span></span>
+        </div>
+        <div id="fileBadge" class="file-name-badge">
+          <i data-lucide="film"></i> <span id="fileNameText">replay.bloxdreplay</span>
+        </div>
+      </div>
+
+      <div class="header-center">
+        <div id="info" class="status-pill">
+          <i data-lucide="check-circle-2" class="status-icon"></i> 準備完了
+        </div>
+      </div>
+
+      <div class="header-right">
+        <button id="gotoBtn" class="btn btn-secondary btn-sm" title="プレイヤーへカメラを移動">
+          <i data-lucide="locate"></i> プレイヤーへ移動
+        </button>
+        <button id="fitBtn" class="btn btn-secondary btn-sm" title="全体のマップを表示">
+          <i data-lucide="maximize-2"></i> 全体表示
+        </button>
+        <button id="fovBtn" class="btn btn-accent btn-sm">
+          <i data-lucide="eye"></i> プレイヤー視点(軽量)
+        </button>
+        <button id="helpBtn" class="btn btn-icon btn-sm" title="ヘルプ">
+          <i data-lucide="help-circle"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- キャンバス・ビューポートエリア -->
+    <div id="viewport" class="viewport-area">
+      <canvas id="mapCanvas"></canvas>
+      <canvas id="playerCanvas"></canvas>
+
+      <!-- ツールチップ -->
+      <div id="tooltip" class="cyber-tooltip"></div>
+    </div>
+
+    <!-- サイドコントロールパネル (ドック可能) -->
+    <aside class="side-panel">
+      <div class="panel-header">
+        <i data-lucide="users"></i> ターゲット選択
+      </div>
+      <div class="panel-body">
+        <div class="input-label">追従エンティティ</div>
+        <select id="entitySelect" class="cyber-select"></select>
+
+        <div class="stats-box">
+          <div class="stat-row">
+            <span class="stat-label">現在のフレーム:</span>
+            <span id="frameTick" class="stat-value">0 / 0</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">時間:</span>
+            <span id="frameTime" class="stat-value">0.0s</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">手持ちアイテム:</span>
+            <span id="frameItem" class="stat-value">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">姿勢:</span>
+            <span id="framePose" class="stat-value">-</span>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- 下部シネマティックタイムラインバー -->
+    <footer id="bar" class="timeline-bar">
+      <div class="controls-left">
+        <button id="playBtn" class="btn btn-primary btn-circle">
+          <i data-lucide="play" id="playIcon"></i>
+        </button>
+        <div class="speed-selector">
+          <label>速度:</label>
+          <select id="speedSelect" class="cyber-select-sm">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1.0x</option>
+            <option value="1.5">1.5x</option>
+            <option value="2">2.0x</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="controls-center">
+        <input type="range" id="scrub" min="0" max="0" value="0" class="cyber-slider">
+      </div>
+
+      <div class="controls-right">
+        <div id="frameInfo" class="time-display">00:00.0 / 00:00.0</div>
+      </div>
+    </footer>
+  </div>
+
+  <!-- スクリプトの読み込み順序 -->
+  <script src="renderer.js"></script>
+  <script src="ui.js"></script>
+  <script>
+    // Lucideアイコンの初期化
+    lucide.createIcons();
+  </script>
 </body>
 </html>
