@@ -377,3 +377,15 @@ function renderPlayerMarker() {
 
   updateFrameInfo(f);
 }
+
+export function setStatusText(msg) {
+  const el = document.getElementById('statusText') || document.getElementById('loadingProgress');
+  if (el) el.innerText = msg;
+  console.log("[Status]:", msg);
+}
+
+// 描画系の操作イベントや初期設定をまとめて初期化する関数
+export function initRendererInteractions() {
+  setupPanZoom();
+  setupHover();
+}
