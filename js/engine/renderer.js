@@ -126,7 +126,7 @@ function drawWallFace(sx, sy, xOffset, wallH, layers, brightnessFactor, isoH, yS
   }
 }
 
-function drawIso() {
+export function drawIso() {
   ISO_W = TILE_SIZE; ISO_H = TILE_SIZE / 2;
   Y_SCALE = ISO_H * 0.6;
 
