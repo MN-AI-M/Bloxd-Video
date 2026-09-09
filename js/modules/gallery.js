@@ -1,4 +1,5 @@
 // js/modules/gallery.js
+
 export function initGallery() {
   const modal = document.getElementById('uploadModal');
   const openBtn = document.getElementById('openUploadModalBtn');
@@ -6,7 +7,6 @@ export function initGallery() {
   const submitBtn = document.getElementById('submitAnimBtn');
   const grid = document.getElementById('galleryGrid');
 
-  // サンプルデータ
   const sampleAnimations = [
     { title: "滑らかな180度旋回カメラ", desc: "キルシーンなどで使える綺麗な旋回カメラワークです。", author: "BloxdPro" },
     { title: "シネマティック追従スロー", desc: "速度0.25xに最適な臨場感あふれるカメラ演出です。", author: "CamMaster" }
@@ -28,8 +28,9 @@ export function initGallery() {
     lucide.createIcons();
   }
 
-  openBtn.addEventListener('click', () => modal.classList.remove('hidden'));
-  closeBtn.addEventListener('click', () => modal.classList.add('hidden'));
+  // active クラスの付け外しでモーダルを開閉
+  openBtn.addEventListener('click', () => modal.classList.add('active'));
+  closeBtn.addEventListener('click', () => modal.classList.remove('active'));
 
   submitBtn.addEventListener('click', () => {
     const title = document.getElementById('animTitleInput').value;
@@ -37,7 +38,7 @@ export function initGallery() {
     if (title) {
       sampleAnimations.unshift({ title, desc, author: "あなた" });
       renderGallery();
-      modal.classList.add('hidden');
+      modal.classList.remove('active');
     }
   });
 
