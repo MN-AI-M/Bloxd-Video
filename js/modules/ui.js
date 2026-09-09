@@ -78,7 +78,9 @@ async function processFile(file) {
     const mainPlayerId = parsedData.timeline ? parsedData.timeline.localPlayerEntityId : null;
     const timelineData = mainPlayerId ? parsedData.timeline.entities[mainPlayerId] : null;
 
-    // ▼ ここから順番を入れ替える ▼
+    console.log("Pythonからの生データ:", parsedData);
+    console.log("ブロックの数:", mappedTiles.length);
+    console.log("タイムラインのフレーム数:", timelineData ? timelineData.frames.length : 0);
 
     // 4-1. まず画面を切り替えて、ブラウザに縦横のサイズを認識させる（重要）
     document.getElementById('introScreen').classList.add('hidden');
