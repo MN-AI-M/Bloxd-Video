@@ -1,41 +1,102 @@
 // ui.js
 // ============================================================
-// 「UI(操作)」だけを担当するファイル。アップロード処理、サーバーとの
-// 通信、ボタン・タイムラインバーの操作など。座標計算や描画そのものは
-// renderer.js の方を見てください。
+// UIイベント・画面遷移・通信・タイムライン制御
 // ============================================================
 
 let API_URL = "";
-let allTimelines = null; // サーバーから受け取った { entities: {...}, ticksPerSecond, ... }
+let allTimelines = null;
 let textureColors = new Map();
 let playing = false, lastFrameTime = 0, animId = null;
+let playbackSpeed = 1.0;
 
+// --- 初期ロード処理 (ページ読み込み時) ---
+window.addEventListener('DOMContentLoaded', () => {
+  const loadingScreen = document.getElementById('loadingScreen');
+  const introScreen = document.getElementById('introScreen');
+  const progressBar = document.getElementById('loadingProgress');
+  const tipEl = document.getElementById('loadingTip');
 
-// ============================================================
-// アップロード〜サーバー通信
-// ============================================================
+  const tips = [
+    "リプレイファイルを読み込み中...",
+    "カメラ位置を微調整できます...",
+    "プレイヤー追従機能でかっこいいカットを作成！",
+    "Bloxd.io リプレイスタジオへようこそ！"
+  ];
 
-document.getElementById('processBtn').addEventListener('click', async () => {
+  let progress = 0;
+  const interval = setInterval(() => {
+    progress += 25;
+    progressBar.style.width = progress + '%';
+    tipEl.innerText = tips[Math.floor(progress / 25) - 1] || "完了！";
+
+    if (progress >= 100) {
+      clearInterval(interval);
+      setTimeout(() => {
+        loadingScreen.classList.add('hidden');
+        introScreen.classList.remove('hidden');
+      }, 400);
+    }
+  }, 200);
+
+  setupDropZone();
+});
+
+// --- ドラッグ＆ドロップ制御 ---
+function setupDropZone() {
+  const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
-  const statusEl = document.getElementById('uploadStatus');
-  if (!fileInput.files.length) { statusEl.innerText = 'ファイルを選んでください'; return; }
+  const selectBtn = document.getElementById('selectFileBtn');
+
+  selectBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    fileInput.click();
+  });
+
+  dropZone.addEventListener('click', () => fileInput.click());
+
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files.length) handleFile(e.target.files[0]);
+  });
+
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+  });
+}
+
+// --- ファイル処理 ---
+async function handleFile(file) {
+  if (!file.name.endsWith('.bloxdreplay')) {
+    alert('.bloxdreplay ファイルを選択してください。');
+    return;
+  }
 
   API_URL = document.getElementById('apiUrlInput').value.trim().replace(/\/$/, '');
-  if (!API_URL) { statusEl.innerText = '解析サーバーURLを入力してください'; return; }
+  const processingOverlay = document.getElementById('processingOverlay');
+  const statusEl = document.getElementById('uploadStatus');
 
-  const file = fileInput.files[0];
-  document.getElementById('processBtn').disabled = true;
-  statusEl.innerText = 'アップロード中... (サーバーが寝てる場合、起動に数十秒かかることがあります)';
+  processingOverlay.classList.remove('hidden');
+  document.getElementById('fileNameText').innerText = file.name;
+  statusEl.innerText = 'サーバーにアップロード＆解析中...';
 
   try {
     const formData = new FormData();
     formData.append('file', file);
     const res = await fetch(API_URL + '/api/process', { method: 'POST', body: formData });
     if (!res.ok) {
-      const errBody = await res.text();
-      throw new Error(`サーバーエラー (${res.status}): ${errBody}`);
+      const errText = await res.text();
+      throw new Error(`サーバーエラー (${res.status}): ${errText}`);
     }
-    statusEl.innerText = '解析データを受信、描画を準備中...';
+
+    statusEl.innerText = 'デコード完了。描画準備中...';
     const data = await res.json();
 
     const palette = data.map.palette;
@@ -55,37 +116,32 @@ document.getElementById('processBtn').addEventListener('click', async () => {
     setRendererData(rawTiles);
     setupEntitySelector();
 
-    document.getElementById('uploadScreen').classList.add('hidden');
-    document.getElementById('editor').classList.add('active');
     await loadTexturesAndInit();
-  } catch (e) {
-    statusEl.innerText = 'エラー: ' + e.message;
-    document.getElementById('processBtn').disabled = false;
+
+    processingOverlay.classList.add('hidden');
+    document.getElementById('introScreen').classList.add('hidden');
+    document.getElementById('editor').classList.remove('hidden');
+
+  } catch (err) {
+    alert('エラーが発生しました: ' + err.message);
+    processingOverlay.classList.add('hidden');
   }
-});
+}
 
-
-// ============================================================
-// テクスチャの読み込み(色の抽出だけして、描画は塗りつぶしで軽量に行う)
-// ============================================================
-
+// --- テクスチャ抽出 ---
 async function loadTexturesAndInit() {
-  setStatusText(`タイル数: ${tiles.length} (読み込み中...)`);
   if (tiles.length === 0) return;
-
-  setStatusText(`タイル数: ${tiles.length} / テクスチャ読み込み中...`);
 
   const neededTextures = new Set();
   for (const t of tiles) {
     if (t.texture) neededTextures.add(t.texture);
     if (t.layers) for (const l of t.layers) if (l.texture) neededTextures.add(l.texture);
   }
+
   const sampleCanvas = document.createElement('canvas');
   sampleCanvas.width = 1; sampleCanvas.height = 1;
   const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
 
-  let loaded = 0, failedCount = 0;
-  const totalTextures = neededTextures.size;
   const promises = [];
   for (const texName of neededTextures) {
     const p = new Promise((resolve) => {
@@ -99,13 +155,10 @@ async function loadTexturesAndInit() {
         } catch (e) {
           textureColors.set(texName, '#888');
         }
-        loaded++;
-        setStatusText(`タイル数: ${tiles.length} / テクスチャ ${loaded}/${totalTextures}`);
         resolve();
       };
       img.onerror = () => {
         textureColors.set(texName, '#a33');
-        loaded++; failedCount++;
         resolve();
       };
       img.src = API_URL + '/assets/textures/' + encodeURIComponent(texName) + '.png';
@@ -120,12 +173,6 @@ async function loadTexturesAndInit() {
     if (t.layers) for (const l of t.layers) l._color = textureColors.get(l.texture) || t._color;
   }
 
-  if (failedCount > totalTextures * 0.3) {
-    setStatusText(`⚠️ テクスチャの${failedCount}/${totalTextures}件が読み込めませんでした(サーバー側のtextures/フォルダを確認してください)`);
-  } else {
-    setStatusText(`タイル数: ${tiles.length} / 完了`);
-  }
-
   initCanvases();
   setupTopButtons();
   drawIso();
@@ -136,11 +183,7 @@ async function loadTexturesAndInit() {
   renderPlayerMarker();
 }
 
-
-// ============================================================
-// エンティティ選択(自分・他のプレイヤー・モブ)
-// ============================================================
-
+// --- エンティティ選択 ---
 function setupEntitySelector() {
   const sel = document.getElementById('entitySelect');
   sel.innerHTML = '';
@@ -168,36 +211,38 @@ function setupEntitySelector() {
   setRendererTimeline(allTimelines.entities[sel.value]);
 }
 
-
-// ============================================================
-// 画面上部のボタン(全体表示・プレイヤーへ移動・視点モード切替)
-// ============================================================
-
+// --- 上部ボタン ---
 function setupTopButtons() {
   document.getElementById('fitBtn').onclick = () => fitToView();
   document.getElementById('gotoBtn').onclick = () => goToPlayer();
   const fovBtn = document.getElementById('fovBtn');
   fovBtn.onclick = () => {
     viewMode = (viewMode === 'radius') ? 'fov' : 'radius';
-    fovBtn.innerText = (viewMode === 'radius') ? '👁 プレイヤー視点(軽量)に切替' : '🔄 周囲表示に戻す';
+    fovBtn.innerHTML = (viewMode === 'radius') ? '<i data-lucide="eye"></i> プレイヤー視点(軽量)' : '<i data-lucide="globe"></i> 全体表示';
+    lucide.createIcons();
     drawIso();
     renderPlayerMarker();
   };
 }
 
-
-// ============================================================
-// タイムライン操作(再生・スクラブ)
-// ============================================================
-
+// --- タイムライン再生制御 ---
 function setupTimelineControls() {
   const scrub = document.getElementById('scrub');
+  const playBtn = document.getElementById('playBtn');
+  const playIcon = document.getElementById('playIcon');
+  const speedSelect = document.getElementById('speedSelect');
+
   scrub.max = timeline.frames.length - 1;
   scrub.addEventListener('input', e => { curTick = parseInt(e.target.value); renderPlayerMarker(); });
 
-  document.getElementById('playBtn').addEventListener('click', () => {
+  speedSelect.addEventListener('change', (e) => {
+    playbackSpeed = parseFloat(e.target.value);
+  });
+
+  playBtn.addEventListener('click', () => {
     playing = !playing;
-    document.getElementById('playBtn').innerText = playing ? '⏸ 一時停止' : '▶ 再生';
+    playIcon.setAttribute('data-lucide', playing ? 'pause' : 'play');
+    lucide.createIcons();
     if (playing) { lastFrameTime = performance.now(); playTick(); }
     else if (animId) cancelAnimationFrame(animId);
   });
@@ -206,9 +251,10 @@ function setupTimelineControls() {
 function playTick() {
   if (!playing) return;
   const now = performance.now();
-  const tps = allTimelines.ticksPerSecond;
+  const tps = allTimelines.ticksPerSecond * playbackSpeed;
   const elapsed = (now - lastFrameTime) / 1000;
   const ticksToAdvance = Math.floor(elapsed * tps);
+
   if (ticksToAdvance > 0) {
     curTick = Math.min(curTick + ticksToAdvance, timeline.frames.length - 1);
     lastFrameTime = now;
@@ -216,24 +262,32 @@ function playTick() {
     renderPlayerMarker();
     if (curTick >= timeline.frames.length - 1) {
       playing = false;
-      document.getElementById('playBtn').innerText = '▶ 再生';
+      document.getElementById('playIcon').setAttribute('data-lucide', 'play');
+      lucide.createIcons();
       return;
     }
   }
   animId = requestAnimationFrame(playTick);
 }
 
-
-// ============================================================
-// 画面表示のちょっとした更新(renderer.js から呼ばれる)
-// ============================================================
-
+// --- UI状態更新 ---
 function setStatusText(text) {
-  document.getElementById('info').innerText = text;
+  document.getElementById('info').innerHTML = `<i data-lucide="info"></i> ${text}`;
+  lucide.createIcons();
 }
 
 function updateFrameInfo(f) {
-  document.getElementById('frameInfo').innerText =
-    `tick ${f.tick}/${timeline.frames.length-1} (${f.time}s)  ` +
-    `pose=${f.pose}  held=${f.heldItemName || 'なし'}  jump=${f.jumping}  crouch=${f.crouching}`;
+  const formatTime = (sec) => {
+    const m = Math.floor(sec / 60).toString().padStart(2, '0');
+    const s = (sec % 60).toFixed(1).padStart(4, '0');
+    return `${m}:${s}`;
+  };
+
+  const totalTime = timeline.frames[timeline.frames.length - 1].time;
+  document.getElementById('frameInfo').innerText = `${formatTime(f.time)} / ${formatTime(totalTime)}`;
+
+  document.getElementById('frameTick').innerText = `${f.tick} / ${timeline.frames.length - 1}`;
+  document.getElementById('frameTime').innerText = `${f.time}s`;
+  document.getElementById('frameItem').innerText = f.heldItemName || 'なし';
+  document.getElementById('framePose').innerText = f.pose !== undefined ? f.pose : '通常';
 }
