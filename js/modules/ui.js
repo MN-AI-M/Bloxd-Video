@@ -75,27 +75,31 @@ async function processFile(file) {
     });
 
     // 3. タイムラインの主要プレイヤー軌跡を取得
-    const mainPlayerId = parsedData.timeline.localPlayerEntityId;
-    const timelineData = parsedData.timeline.entities[mainPlayerId];
+    const mainPlayerId = parsedData.timeline ? parsedData.timeline.localPlayerEntityId : null;
+    const timelineData = mainPlayerId ? parsedData.timeline.entities[mainPlayerId] : null;
 
-    // 4. レンダラーへ渡して描画
-    setRendererData(mappedTiles);
-    setRendererTimeline(timelineData);
-    initCanvases();
-    
-    // ▼ ここを追加：マウス操作やホバー機能を有効化する
-    import('../engine/renderer.js').then(r => {
-      if (typeof r.initRendererInteractions === 'function') {
-        r.initRendererInteractions();
-      }
-    });
+    // ▼ ここから順番を入れ替える ▼
 
-    drawIso();
-    fitToView();
-
-    // 画面遷移
+    // 4-1. まず画面を切り替えて、ブラウザに縦横のサイズを認識させる（重要）
     document.getElementById('introScreen').classList.add('hidden');
     document.getElementById('editorScreen').classList.remove('hidden');
+
+    // 4-2. 画面サイズが確定するのを一瞬（50ミリ秒）待ってから描画を走らせる
+    setTimeout(() => {
+      setRendererData(mappedTiles);
+      setRendererTimeline(timelineData);
+      initCanvases();
+      
+      // 操作イベントの有効化
+      import('../engine/renderer.js').then(r => {
+        if (typeof r.initRendererInteractions === 'function') {
+          r.initRendererInteractions();
+        }
+      });
+
+      drawIso();
+      fitToView(); // 画面が表示されているので、ここで正しいズーム率が計算される！
+    }, 50);
 
   } catch (err) {
     console.error(err);
