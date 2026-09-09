@@ -8,7 +8,8 @@ export async function initParser(onProgress) {
     
     // index.html で読み込んだ loadPyodide を実行
     const pyodide = await window.loadPyodide({
-      indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.0/full/"
+      indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.0/full/",
+      fullStdLib: false
     });
     window.pyodide = pyodide;
 
