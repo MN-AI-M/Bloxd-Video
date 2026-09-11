@@ -300,13 +300,6 @@ function setupEntitySelector() {
 function setupTopButtons() {
   document.getElementById('fitBtn').onclick = () => fitToView();
   document.getElementById('gotoBtn').onclick = () => goToPlayer();
-  const fovBtn = document.getElementById('fovBtn');
-  fovBtn.onclick = () => {
-    viewMode = (viewMode === 'radius') ? 'fov' : 'radius';
-    fovBtn.innerText = (viewMode === 'radius') ? '👁 プレイヤー視点(軽量)に切替' : '🔄 周囲表示に戻す';
-    drawIso();
-    renderPlayerMarker();
-  };
 }
 
 
