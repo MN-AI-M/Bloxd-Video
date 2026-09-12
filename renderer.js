@@ -225,6 +225,9 @@ function pushWallFace(verts, sx, sy, xOffset, wallH, layers, brightnessFactor, d
   // 1段ずつ、実際に積まれてるブロックの色で塗って断面っぽく見せる。
   // layersのデータが尽きたら、そこから先は塗らない
   // (下にある建築物が隠れてしまわないよう、無理に埋めない)。
+  // ※ 呼び出し側で「連続したブロックのかたまり(run)」だけを渡すこと。
+  //   途中に空気の隙間がある構造物のlayersをそのまま渡すと、隙間の下にある
+  //   無関係な構造物の色がここに圧縮されて描かれてしまう(「建築が潰れる」原因)。
   let covered = 0;
   if (!layers || !layers.length) return;
   for (const l of layers) {
@@ -240,6 +243,26 @@ function pushWallFace(verts, sx, sy, xOffset, wallH, layers, brightnessFactor, d
       depth, rgb);
     covered += segH;
   }
+}
+
+// layers([{y, _color}, ...]、上から下に並んでる前提)を、
+// Yが連続している「かたまり(run)」ごとに分割する。
+// 縦に離れた複数の構造物(例: 地上の建物+はるか上空の建物)が同じ列にある場合、
+// これで別々のかたまりとして扱えるようになる。
+function splitLayersIntoRuns(layers) {
+  if (!layers || !layers.length) return [];
+  const runs = [];
+  let current = [layers[0]];
+  for (let i = 1; i < layers.length; i++) {
+    if (layers[i-1].y - layers[i].y === 1) {
+      current.push(layers[i]);
+    } else {
+      runs.push(current);
+      current = [layers[i]];
+    }
+  }
+  runs.push(current);
+  return runs;
 }
 
 function buildGeometry() {
@@ -262,16 +285,46 @@ function buildGeometry() {
       [sx, sy - ISO_H/2], [sx + ISO_W/2, sy], [sx, sy + ISO_H/2], [sx - ISO_W/2, sy],
       depth, topRGB);
 
+    // layersを実際に連続してるかたまりごとに分ける。
+    // runs[0] = 一番上のかたまり(=このタイルの「地表」そのもの)。
+    // runs[1]以降 = 縦に離れた別の構造物(地下・浮いてる床など)。
+    const runs = splitLayersIntoRuns(t.layers);
+    const run0 = runs.length ? runs[0] : [{ y: t.y, _color: t._color }];
+
     const rightNeighbor = tileIndex.get((lx + 1) + '_' + lz);
     const leftNeighbor = tileIndex.get(lx + '_' + (lz + 1));
 
+    // 崖の壁(隣の列が低い場合)。一番上のかたまり分の色データだけを使い、
+    // それより下(=別の構造物)の色を巻き込まないようにする。
     if (rightNeighbor) {
       const rightDrop = t.y - rightNeighbor.y;
-      if (rightDrop >= 1) pushWallFace(verts, sx, sy, ISO_W/2, rightDrop * Y_SCALE, t.layers, brightness * 0.55, depth);
+      if (rightDrop >= 1) pushWallFace(verts, sx, sy, ISO_W/2, rightDrop * Y_SCALE, run0, brightness * 0.55, depth);
     }
     if (leftNeighbor) {
       const leftDrop = t.y - leftNeighbor.y;
-      if (leftDrop >= 1) pushWallFace(verts, sx, sy, -ISO_W/2, leftDrop * Y_SCALE, t.layers, brightness * 0.75, depth);
+      if (leftDrop >= 1) pushWallFace(verts, sx, sy, -ISO_W/2, leftDrop * Y_SCALE, run0, brightness * 0.75, depth);
+    }
+
+    // 2つ目以降のかたまり = 縦に離れた別の構造物。今までは完全に無視されて
+    // 「潰れて」いた部分。それぞれ独立した「浮いてる床」として、自分の
+    // 本当の高さに天面を、自分の実際の厚みぶんだけ側面を描く。
+    // (隣の列との高さ比較はしない: 下まで壁を伸ばすと、本来空洞のはずの
+    //  空間を柱のように塗り潰してしまう誤りになるため)
+    for (let ri = 1; ri < runs.length; ri++) {
+      const run = runs[ri];
+      const runTopY = run[0].y;
+      const runBottomY = run[run.length - 1].y;
+      const rsy = (lx + lz) * ISO_H / 2 - (runTopY - isoMinY) * Y_SCALE + 20;
+      const runBrightness = 0.75 + 0.35 * ((runTopY - isoMinY) / yRange);
+      const runTopRGB = shadeColorRGB(run[0]._color || t._color, runBrightness);
+
+      pushQuad(verts,
+        [sx, rsy - ISO_H/2], [sx + ISO_W/2, rsy], [sx, rsy + ISO_H/2], [sx - ISO_W/2, rsy],
+        depth, runTopRGB);
+
+      const runDepth = (runTopY - runBottomY + 1) * Y_SCALE;
+      pushWallFace(verts, sx, rsy, ISO_W/2, runDepth, run, runBrightness * 0.55, depth);
+      pushWallFace(verts, sx, rsy, -ISO_W/2, runDepth, run, runBrightness * 0.75, depth);
     }
   }
 
