@@ -20,6 +20,13 @@ const TILE_SIZE = 16;
 const ISO_W = TILE_SIZE, ISO_H = TILE_SIZE / 2;
 const Y_SCALE = ISO_H * 0.6;
 
+// 縦に離れた「浮いてる構造物」を描画する際の安全弁。
+// 木の葉・花・柵などの装飾ノイズが大量の小さな「かたまり」として
+// 誤検出され、頂点数が爆発してブラウザが落ちるのを防ぐための閾値。
+const EXTRA_RUN_MIN_THICKNESS = 2;   // これ未満の厚みの浮いてるかたまりは描画しない(装飾ノイズとみなす)
+const MAX_EXTRA_RUNS_PER_COLUMN = 6; // 1列あたりに描画する「浮いてる構造物」の最大数
+const MAX_VERTS = 6000000;           // 頂点数の全体上限(超えたらクラッシュではなく打ち切って警告)
+
 // --- 描画対象のデータ(ui.js から setRendererData() で渡される) ---
 let tiles = [], tileIndex = null;
 let minX, maxX, minZ, maxZ, minY, maxY;
@@ -269,8 +276,11 @@ function buildGeometry() {
   const maxSum = Math.max(1, (isoMaxX - isoMinX) + (isoMaxZ - isoMinZ));
   const yRange = Math.max(1, isoMaxY - isoMinY);
   const verts = [];
+  let truncated = false;
 
   for (const t of tiles) {
+    if (verts.length / 6 >= MAX_VERTS) { truncated = true; break; }
+
     const lx = t.x - isoMinX, lz = t.z - isoMinZ;
     const sx = (lx - lz) * ISO_W / 2 + isoOriginX;
     const sy = (lx + lz) * ISO_H / 2 - (t.y - isoMinY) * Y_SCALE + 20;
@@ -310,8 +320,18 @@ function buildGeometry() {
     // 本当の高さに天面を、自分の実際の厚みぶんだけ側面を描く。
     // (隣の列との高さ比較はしない: 下まで壁を伸ばすと、本来空洞のはずの
     //  空間を柱のように塗り潰してしまう誤りになるため)
-    for (let ri = 1; ri < runs.length; ri++) {
+    //
+    // ただし、木の葉・花・柵などの装飾で1〜2列あたり大量の小さな
+    // かたまりが生まれると頂点数が爆発してしまうため、
+    // ・薄すぎる(EXTRA_RUN_MIN_THICKNESS未満)かたまりは装飾ノイズとみなして描画しない
+    // ・1列あたりの描画数にも上限(MAX_EXTRA_RUNS_PER_COLUMN)を設ける
+    // という安全弁を入れてある。
+    let extraDrawn = 0;
+    for (let ri = 1; ri < runs.length && extraDrawn < MAX_EXTRA_RUNS_PER_COLUMN; ri++) {
       const run = runs[ri];
+      if (run.length < EXTRA_RUN_MIN_THICKNESS) continue;
+      extraDrawn++;
+
       const runTopY = run[0].y;
       const runBottomY = run[run.length - 1].y;
       const rsy = (lx + lz) * ISO_H / 2 - (runTopY - isoMinY) * Y_SCALE + 20;
@@ -331,6 +351,10 @@ function buildGeometry() {
   vertexCount = verts.length / 6;
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
+
+  if (truncated) {
+    setStatusText(`⚠️ データ量が多すぎたため、一部のタイルは描画を省略しました(頂点数上限 ${MAX_VERTS.toLocaleString()} に到達)`);
+  }
 }
 
 
