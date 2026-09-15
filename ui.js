@@ -10,6 +10,7 @@
 // ============================================================
 
 let allTimelines = null;
+let currentMesh = null;
 let textureColors = new Map();
 let playing = false, lastFrameTime = 0, animId = null;
 let pyodide = null;
@@ -146,21 +147,9 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 
     statusEl.innerText = '描画を準備中...';
 
-    const palette = data.map.palette;
-    const rawTiles = data.map.tiles;
-    for (const t of rawTiles) {
-      const p = palette[t.assetIdx] || {};
-      t.root_name = p.root_name; t.texture = p.texture; t.model = p.model; t.asset_type = p.asset_type;
-      if (t.layers) {
-        t.layers = t.layers.map(([ly, lIdx]) => {
-          const lp = palette[lIdx] || {};
-          return { y: ly, root_name: lp.root_name, texture: lp.texture };
-        });
-      }
-    }
-
+    currentMesh = data.mesh;
     allTimelines = data.timelines;
-    setRendererData(rawTiles);
+    setRendererMesh(currentMesh);
     setupEntitySelector();
 
     document.getElementById('uploadScreen').classList.add('hidden');
@@ -175,14 +164,16 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 
 // ============================================================
 // テクスチャの読み込み(色の抽出だけして、描画は塗りつぶしで軽量に行う)
-// このサイトに同梱した静的ファイル(./textures/)からそのまま読む。
+// このサイトに同梱した textures.zip からそのまま読む。
 // ============================================================
 
 async function loadTexturesAndInit() {
-  setStatusText(`タイル数: ${tiles.length} (読み込み中...)`);
-  if (tiles.length === 0) return;
+  const mesh = currentMesh;
+  const faceCount = mesh.faces.length;
+  setStatusText(`面数: ${faceCount.toLocaleString()} (読み込み中...)`);
+  if (faceCount === 0) return;
 
-  setStatusText(`タイル数: ${tiles.length} / textures.zip を展開中...`);
+  setStatusText(`面数: ${faceCount.toLocaleString()} / textures.zip を展開中...`);
   try {
     await ensureTexturesLoading();
   } catch (e) {
@@ -190,13 +181,12 @@ async function loadTexturesAndInit() {
     textureUrls = new Map(); // 空のまま続行 → 全テクスチャがフォールバック色になる
   }
 
-  setStatusText(`タイル数: ${tiles.length} / テクスチャ読み込み中...`);
+  setStatusText(`面数: ${faceCount.toLocaleString()} / テクスチャ読み込み中...`);
 
+  const palette = mesh.palette;
   const neededTextures = new Set();
-  for (const t of tiles) {
-    if (t.texture) neededTextures.add(t.texture);
-    if (t.layers) for (const l of t.layers) if (l.texture) neededTextures.add(l.texture);
-  }
+  for (const p of palette) if (p.texture) neededTextures.add(p.texture);
+
   const sampleCanvas = document.createElement('canvas');
   sampleCanvas.width = 1; sampleCanvas.height = 1;
   const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
@@ -224,7 +214,7 @@ async function loadTexturesAndInit() {
           textureColors.set(texName, '#888');
         }
         loaded++;
-        setStatusText(`タイル数: ${tiles.length} / テクスチャ ${loaded}/${totalTextures}`);
+        setStatusText(`面数: ${faceCount.toLocaleString()} / テクスチャ ${loaded}/${totalTextures}`);
         resolve();
       };
       img.onerror = () => {
@@ -238,18 +228,18 @@ async function loadTexturesAndInit() {
   }
   await Promise.all(promises);
 
-  for (const t of tiles) {
-    t._color = textureColors.get(t.texture) || ((t.asset_type === '3d_model') ? '#7a4a2a' : '#444');
-    if (t.uncertain) t._color = muteColor(t._color);
-    if (t.layers) for (const l of t.layers) l._color = textureColors.get(l.texture) || t._color;
-  }
+  // パレットの各見た目に、実際のRGB色(テクスチャの平均色)を割り当てる
+  const paletteColors = palette.map(p =>
+    textureColors.get(p.texture) || ((p.asset_type === '3d_model') ? '#7a4a2a' : '#444')
+  );
 
   if (failedCount > totalTextures * 0.3) {
     setStatusText(`⚠️ テクスチャの${failedCount}/${totalTextures}件が読み込めませんでした(textures.zipの中身を確認してください)`);
   } else {
-    setStatusText(`タイル数: ${tiles.length} / 完了`);
+    setStatusText(`面数: ${faceCount.toLocaleString()} / 完了`);
   }
 
+  setRendererPaletteColors(paletteColors);
   initCanvases();
   setupTopButtons();
   drawIso();

@@ -4,38 +4,59 @@
 // プレイヤーマーカーの描画など。UI(ボタンやアップロード処理)は
 // ui.js の方を見てください。
 //
-// v3: WebGL化。全タイルのジオメトリをデータ読み込み時に1回だけ構築して
-//     GPUに送り、パン/ズーム/プレイヤー追従はuniform更新+再描画だけで
-//     済むようにした。これにより「プレイヤー周辺だけ描画する」窓を
-//     撤廃でき、常に全体を描画できる(=全体オーバービューがそのまま
-//     使えるようになった)。
+// v4: データモデルを「列ごとの高さマップ+断面色」から、
+//     build_2d_map.build_voxel_mesh_from_decoded() が出す
+//     「面カリング済みのボクセルメッシュ(faces)」に変更した。
+//     一般的なボクセルレンダラー(Minecraft系)と同じ発想:
+//     各面は「空気(または未記録)に接している面だけ」なので、
+//     地中に埋まってるブロックは自動的に無視され、縦に離れた
+//     複数の構造物も特別扱いなしで正しく表示される。
+//     v3であった「かたまり(run)検出」や装飾ノイズ除去の閾値は
+//     もう不要になったので削除した。
 //
-// 重なり順(奥/手前)はCanvas2Dの描画順ではなく、GPUのdepth bufferに
-// 任せている。奥行きの目安は元のCanvas2D版と同じ「(x+z)が大きいほど
-// 手前」というルールをそのままdepth値に変換しているだけなので、
-// 見た目はほぼ変わらない。
+// 頂点の実座標変換(アイソメトリック投影)と奥行き(depth)の計算は
+// 両方ともGPU側(頂点シェーダー)で行う。CPU側は「ブロックのローカル
+// 座標+色」を渡すだけで、パン/ズームはuniform更新のみで反映される。
 // ============================================================
 
 const TILE_SIZE = 16;
 const ISO_W = TILE_SIZE, ISO_H = TILE_SIZE / 2;
 const Y_SCALE = ISO_H * 0.6;
+const DEPTH_Y_FACTOR = ISO_H / Y_SCALE; // 奥行き計算で使う、Y方向の重み(下の解説参照)
 
-// 縦に離れた「浮いてる構造物」を描画する際の安全弁。
-// 木の葉・花・柵などの装飾ノイズが大量の小さな「かたまり」として
-// 誤検出され、頂点数が爆発してブラウザが落ちるのを防ぐための閾値。
-const EXTRA_RUN_MIN_THICKNESS = 2;   // これ未満の厚みの浮いてるかたまりは描画しない(装飾ノイズとみなす)
-const MAX_EXTRA_RUNS_PER_COLUMN = 6; // 1列あたりに描画する「浮いてる構造物」の最大数
-const MAX_VERTS = 6000000;           // 頂点数の全体上限(超えたらクラッシュではなく打ち切って警告)
+const MAX_VERTS = 6000000; // 頂点数の全体上限(超えたらクラッシュではなく打ち切って警告)
 
-// --- 描画対象のデータ(ui.js から setRendererData() で渡される) ---
-let tiles = [], tileIndex = null;
-let minX, maxX, minZ, maxZ, minY, maxY;
+// 6方向それぞれの、ブロック単位立方体(0,0,0)〜(1,1,1)における面の4隅。
+// Python側(build_2d_map.VOXEL_MESH_DIRS)と同じ順序:
+// +x, -x, +y(上面), -y(底面), +z, -z
+const FACE_OFFSETS = [
+  [[1,0,0],[1,1,0],[1,1,1],[1,0,1]], // +x
+  [[0,0,0],[0,0,1],[0,1,1],[0,1,0]], // -x
+  [[0,1,0],[0,1,1],[1,1,1],[1,1,0]], // +y (上面)
+  [[0,0,0],[1,0,0],[1,0,1],[0,0,1]], // -y (底面)
+  [[0,0,1],[1,0,1],[1,1,1],[0,1,1]], // +z
+  [[0,0,0],[0,1,0],[1,1,0],[1,0,0]], // -z
+];
+// 面の向きごとの簡易的な明暗係数(疑似的なライティング)。
+// +y(上面)は一番明るく、-y(底面、ほぼ見えない)は一番暗い。
+const DIR_FACTOR = [0.65, 0.55, 1.0, 0.35, 0.8, 0.7];
+
+// --- 描画対象のデータ(ui.js から setRendererMesh() で渡される) ---
+let meshFaces = null;       // [[x,y,z,dirCode,paletteIdx], ...]
+let meshPalette = null;     // [{root_name, texture, model, asset_type}, ...] (色はまだ解決されてない)
+let paletteColorsRaw = null;// meshPaletteと同じ並びで、解決済みの色文字列("rgb(...)"等)
 let isoMinX, isoMaxX, isoMinZ, isoMaxZ, isoMinY, isoMaxY, isoOriginX;
+let depthNorm = 1;          // 奥行きの正規化係数(1/最大値)
+
+// ホバー時のブロック名表示専用の簡易インデックス。
+// (x,z)列ごとに、一番上の「上面(+y)」を持つブロックだけを覚えておく。
+// 描画のジオメトリとは無関係で、ツールチップ表示のためだけに使う。
+let hoverIndex = null;
 
 // --- キャンバス / WebGL ---
 let canvas, gl, program, vbo;
 let playerCanvas, pctx;
-let aPosLoc, aDepthLoc, aColorLoc, uPanLoc, uZoomLoc, uResLoc;
+let aPosLoc, aColorLoc, uPanLoc, uZoomLoc, uResLoc, uIsoOriginXLoc, uDepthNormLoc;
 let vertexCount = 0;
 
 // --- 表示状態 ---
@@ -74,47 +95,39 @@ function shadeColorRGB(str, factor) {
   return [clamp(r), clamp(g), clamp(b)];
 }
 
-function muteColor(rgbStr) {
-  // データ不足(uncertain)のタイル用: 彩度を落として紫がかった灰色に寄せる
-  const [r, g, b] = parseColor(rgbStr);
-  const gray = (r + g + b) / 3;
-  const mix = v => Math.round(v * 0.25 + gray * 0.35 + 90 * 0.4);
-  return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
-}
-
 
 // ============================================================
 // 初期化(データ)
 // ============================================================
 
-function setRendererData(newTiles) {
-  tiles = newTiles;
+// ui.js から、Pythonが返したメッシュ(まだ色は解決されてない)を渡す。
+// この時点ではジオメトリはまだ作らない(パレットの色が決まってから)。
+function setRendererMesh(mesh) {
+  meshFaces = mesh.faces;
+  meshPalette = mesh.palette;
+  paletteColorsRaw = null;
+  vertexCount = 0;
 
-  const certainTiles = tiles.filter(t => !t.uncertain);
-  const boundsSource = certainTiles.length > 0 ? certainTiles : tiles;
+  const [bx0, bx1, by0, by1, bz0, bz1] = mesh.bbox;
+  isoMinX = bx0; isoMaxX = bx1;
+  isoMinY = by0; isoMaxY = by1;
+  isoMinZ = bz0; isoMaxZ = bz1;
 
-  minX = Infinity; maxX = -Infinity; minZ = Infinity; maxZ = -Infinity;
-  minY = Infinity; maxY = -Infinity;
-  for (const t of boundsSource) {
-    if (t.x < minX) minX = t.x;
-    if (t.x > maxX) maxX = t.x;
-    if (t.z < minZ) minZ = t.z;
-    if (t.z > maxZ) maxZ = t.z;
-    if (t.y < minY) minY = t.y;
-    if (t.y > maxY) maxY = t.y;
-  }
-  tiles = tiles.filter(t => t.x >= minX && t.x <= maxX && t.z >= minZ && t.z <= maxZ);
+  const hSpan = isoMaxZ - isoMinZ + 1;
+  isoOriginX = hSpan * ISO_W / 2 + 20;
 
-  tileIndex = new Map();
-  for (const t of tiles) tileIndex.set((t.x - minX) + '_' + (t.z - minZ), t);
+  // 奥行きの正規化(下の「奥行きの計算方法」の解説を参照)。
+  const maxRawDepth = Math.max(1, (isoMaxX - isoMinX) + (isoMaxZ - isoMinZ) + (isoMaxY - isoMinY) * DEPTH_Y_FACTOR);
+  depthNorm = 1 / maxRawDepth;
 
-  // もう「プレイヤー周辺だけ」の窓は無いので、iso座標系の範囲は常に全体。
-  isoMinX = minX; isoMaxX = maxX; isoMinZ = minZ; isoMaxZ = maxZ;
-  isoMinY = minY; isoMaxY = maxY;
-  const hTiles = isoMaxZ - isoMinZ + 1;
-  isoOriginX = hTiles * ISO_W / 2 + 20;
+  buildHoverIndex();
+}
 
-  if (gl) buildGeometry();
+// ui.js から、テクスチャ読み込み後に解決した色(パレットと同じ並びの配列)を渡す。
+// ここで初めて実際のジオメトリを構築する。
+function setRendererPaletteColors(colors) {
+  paletteColorsRaw = colors;
+  if (gl && meshFaces) buildGeometry();
 }
 
 function setRendererTimeline(newTimeline) {
@@ -122,24 +135,62 @@ function setRendererTimeline(newTimeline) {
   curTick = 0;
 }
 
+function buildHoverIndex() {
+  hoverIndex = new Map();
+  if (!meshFaces) return;
+  for (const f of meshFaces) {
+    const [x, y, z, dirCode, pIdx] = f;
+    if (dirCode !== 2) continue; // +y(上面)だけを「その列の地表」候補として使う
+    const key = (x - isoMinX) + '_' + (z - isoMinZ);
+    const existing = hoverIndex.get(key);
+    if (!existing || y > existing.y) hoverIndex.set(key, { x, y, z, paletteIdx: pIdx });
+  }
+}
+
 
 // ============================================================
 // WebGLセットアップ
 // ============================================================
+//
+// 奥行き(depth)の計算方法について:
+// このアイソメトリック投影は、画面上で
+//   sx = (x - z) * ISO_W/2 + 定数
+//   sy = (x + z) * ISO_H/2 - y * Y_SCALE + 定数
+// という式で(x,y,z)を平行投影している。同じ画面位置(sx,sy)に映る
+// 別の(x,y,z)たちは、実はカメラの視線方向(1, ISO_H/Y_SCALE, 1)に
+// 沿って並んでいる(数式的に導出できる)。なので
+//   奥行き ∝ x + z + y * (ISO_H/Y_SCALE)
+// という量が、画面上で重なり得る点同士を正しい前後関係に並べる
+// (=depth bufferで正しく隠面消去できる)値になる。
+// ============================================================
 
 const VERTEX_SHADER_SRC = `
-  attribute vec2 aPos;    // iso-pixel空間(ズーム適用前)の座標
-  attribute float aDepth; // -1(奥) 〜 1(手前)
+  attribute vec3 aPos;   // ブロックのローカル座標 (lx, ly, lz)
   attribute vec3 aColor;
   uniform vec2 uPan;
   uniform float uZoom;
   uniform vec2 uResolution;
+  uniform float uIsoOriginX;
+  uniform float uDepthNorm;
   varying vec3 vColor;
+
+  const float ISO_W = ${ISO_W.toFixed(1)};
+  const float ISO_H = ${ISO_H.toFixed(1)};
+  const float Y_SCALE = ${Y_SCALE.toFixed(4)};
+  const float DEPTH_Y_FACTOR = ${DEPTH_Y_FACTOR.toFixed(6)};
+
   void main() {
-    vec2 screen = aPos * uZoom + uPan;
+    float sx = (aPos.x - aPos.z) * (ISO_W * 0.5) + uIsoOriginX;
+    float sy = (aPos.x + aPos.z) * (ISO_H * 0.5) - aPos.y * Y_SCALE + 20.0;
+
+    vec2 screen = vec2(sx, sy) * uZoom + uPan;
     vec2 clip = (screen / uResolution) * 2.0 - 1.0;
     clip.y = -clip.y;
-    gl_Position = vec4(clip, aDepth, 1.0);
+
+    float rawDepth = (aPos.x + aPos.z) + aPos.y * DEPTH_Y_FACTOR;
+    float depth = 1.0 - 2.0 * (rawDepth * uDepthNorm);
+
+    gl_Position = vec4(clip, depth, 1.0);
     vColor = aColor;
   }
 `;
@@ -175,11 +226,12 @@ function initGL() {
     throw new Error('シェーダープログラムのリンクに失敗しました: ' + gl.getProgramInfoLog(program));
   }
   aPosLoc = gl.getAttribLocation(program, 'aPos');
-  aDepthLoc = gl.getAttribLocation(program, 'aDepth');
   aColorLoc = gl.getAttribLocation(program, 'aColor');
   uPanLoc = gl.getUniformLocation(program, 'uPan');
   uZoomLoc = gl.getUniformLocation(program, 'uZoom');
   uResLoc = gl.getUniformLocation(program, 'uResolution');
+  uIsoOriginXLoc = gl.getUniformLocation(program, 'uIsoOriginX');
+  uDepthNormLoc = gl.getUniformLocation(program, 'uDepthNorm');
 
   vbo = gl.createBuffer();
   gl.enable(gl.DEPTH_TEST);
@@ -202,8 +254,8 @@ function initCanvases() {
   }
   resizeCanvases();
 
-  // 既にタイルデータが来ていれば(WebGL準備が後追いになった場合)ここでジオメトリを構築
-  if (tiles.length > 0 && vertexCount === 0) buildGeometry();
+  // 既にメッシュ+色データが揃っていれば(WebGL準備が後追いになった場合)ここで構築
+  if (meshFaces && meshFaces.length && paletteColorsRaw && vertexCount === 0) buildGeometry();
 }
 
 function resizeCanvases() {
@@ -218,133 +270,28 @@ function resizeCanvases() {
 // ジオメトリ構築(データ読み込み時に1回だけ)
 // ============================================================
 
-function pushQuad(verts, p0, p1, p2, p3, depth, rgb) {
-  const [r, g, b] = rgb;
-  verts.push(p0[0], p0[1], depth, r, g, b);
-  verts.push(p1[0], p1[1], depth, r, g, b);
-  verts.push(p2[0], p2[1], depth, r, g, b);
-  verts.push(p0[0], p0[1], depth, r, g, b);
-  verts.push(p2[0], p2[1], depth, r, g, b);
-  verts.push(p3[0], p3[1], depth, r, g, b);
-}
-
-function pushWallFace(verts, sx, sy, xOffset, wallH, layers, brightnessFactor, depth) {
-  // 1段ずつ、実際に積まれてるブロックの色で塗って断面っぽく見せる。
-  // layersのデータが尽きたら、そこから先は塗らない
-  // (下にある建築物が隠れてしまわないよう、無理に埋めない)。
-  // ※ 呼び出し側で「連続したブロックのかたまり(run)」だけを渡すこと。
-  //   途中に空気の隙間がある構造物のlayersをそのまま渡すと、隙間の下にある
-  //   無関係な構造物の色がここに圧縮されて描かれてしまう(「建築が潰れる」原因)。
-  let covered = 0;
-  if (!layers || !layers.length) return;
-  for (const l of layers) {
-    if (covered >= wallH) break;
-    const segH = Math.min(Y_SCALE, wallH - covered);
-    const rgb = shadeColorRGB(l._color || '#444', brightnessFactor);
-    const yStart = covered;
-    pushQuad(verts,
-      [sx, sy + ISO_H/2 + yStart],
-      [sx + xOffset, sy + yStart],
-      [sx + xOffset, sy + yStart + segH],
-      [sx, sy + ISO_H/2 + yStart + segH],
-      depth, rgb);
-    covered += segH;
-  }
-}
-
-// layers([{y, _color}, ...]、上から下に並んでる前提)を、
-// Yが連続している「かたまり(run)」ごとに分割する。
-// 縦に離れた複数の構造物(例: 地上の建物+はるか上空の建物)が同じ列にある場合、
-// これで別々のかたまりとして扱えるようになる。
-function splitLayersIntoRuns(layers) {
-  if (!layers || !layers.length) return [];
-  const runs = [];
-  let current = [layers[0]];
-  for (let i = 1; i < layers.length; i++) {
-    if (layers[i-1].y - layers[i].y === 1) {
-      current.push(layers[i]);
-    } else {
-      runs.push(current);
-      current = [layers[i]];
-    }
-  }
-  runs.push(current);
-  return runs;
-}
-
 function buildGeometry() {
-  const maxSum = Math.max(1, (isoMaxX - isoMinX) + (isoMaxZ - isoMinZ));
+  if (!meshFaces || !paletteColorsRaw) return;
   const yRange = Math.max(1, isoMaxY - isoMinY);
   const verts = [];
   let truncated = false;
 
-  for (const t of tiles) {
+  for (const f of meshFaces) {
     if (verts.length / 6 >= MAX_VERTS) { truncated = true; break; }
 
-    const lx = t.x - isoMinX, lz = t.z - isoMinZ;
-    const sx = (lx - lz) * ISO_W / 2 + isoOriginX;
-    const sy = (lx + lz) * ISO_H / 2 - (t.y - isoMinY) * Y_SCALE + 20;
+    const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4];
+    const bx = wx - isoMinX, by = wy - isoMinY, bz = wz - isoMinZ;
 
-    // 奥行き: 元のCanvas2D版の描画順(x+zが大きいほど後=手前)をそのままdepthに変換
-    const depth = 1.0 - 2.0 * ((lx + lz) / maxSum);
+    const brightness = (0.75 + 0.35 * (by / yRange)) * DIR_FACTOR[dirCode];
+    const rgb = shadeColorRGB(paletteColorsRaw[pIdx] || '#888', brightness);
+    const [r, g, b] = rgb;
 
-    const brightness = 0.75 + 0.35 * ((t.y - isoMinY) / yRange);
-    const topRGB = shadeColorRGB(t._color, brightness);
-
-    pushQuad(verts,
-      [sx, sy - ISO_H/2], [sx + ISO_W/2, sy], [sx, sy + ISO_H/2], [sx - ISO_W/2, sy],
-      depth, topRGB);
-
-    // layersを実際に連続してるかたまりごとに分ける。
-    // runs[0] = 一番上のかたまり(=このタイルの「地表」そのもの)。
-    // runs[1]以降 = 縦に離れた別の構造物(地下・浮いてる床など)。
-    const runs = splitLayersIntoRuns(t.layers);
-    const run0 = runs.length ? runs[0] : [{ y: t.y, _color: t._color }];
-
-    const rightNeighbor = tileIndex.get((lx + 1) + '_' + lz);
-    const leftNeighbor = tileIndex.get(lx + '_' + (lz + 1));
-
-    // 崖の壁(隣の列が低い場合)。一番上のかたまり分の色データだけを使い、
-    // それより下(=別の構造物)の色を巻き込まないようにする。
-    if (rightNeighbor) {
-      const rightDrop = t.y - rightNeighbor.y;
-      if (rightDrop >= 1) pushWallFace(verts, sx, sy, ISO_W/2, rightDrop * Y_SCALE, run0, brightness * 0.55, depth);
-    }
-    if (leftNeighbor) {
-      const leftDrop = t.y - leftNeighbor.y;
-      if (leftDrop >= 1) pushWallFace(verts, sx, sy, -ISO_W/2, leftDrop * Y_SCALE, run0, brightness * 0.75, depth);
-    }
-
-    // 2つ目以降のかたまり = 縦に離れた別の構造物。今までは完全に無視されて
-    // 「潰れて」いた部分。それぞれ独立した「浮いてる床」として、自分の
-    // 本当の高さに天面を、自分の実際の厚みぶんだけ側面を描く。
-    // (隣の列との高さ比較はしない: 下まで壁を伸ばすと、本来空洞のはずの
-    //  空間を柱のように塗り潰してしまう誤りになるため)
-    //
-    // ただし、木の葉・花・柵などの装飾で1〜2列あたり大量の小さな
-    // かたまりが生まれると頂点数が爆発してしまうため、
-    // ・薄すぎる(EXTRA_RUN_MIN_THICKNESS未満)かたまりは装飾ノイズとみなして描画しない
-    // ・1列あたりの描画数にも上限(MAX_EXTRA_RUNS_PER_COLUMN)を設ける
-    // という安全弁を入れてある。
-    let extraDrawn = 0;
-    for (let ri = 1; ri < runs.length && extraDrawn < MAX_EXTRA_RUNS_PER_COLUMN; ri++) {
-      const run = runs[ri];
-      if (run.length < EXTRA_RUN_MIN_THICKNESS) continue;
-      extraDrawn++;
-
-      const runTopY = run[0].y;
-      const runBottomY = run[run.length - 1].y;
-      const rsy = (lx + lz) * ISO_H / 2 - (runTopY - isoMinY) * Y_SCALE + 20;
-      const runBrightness = 0.75 + 0.35 * ((runTopY - isoMinY) / yRange);
-      const runTopRGB = shadeColorRGB(run[0]._color || t._color, runBrightness);
-
-      pushQuad(verts,
-        [sx, rsy - ISO_H/2], [sx + ISO_W/2, rsy], [sx, rsy + ISO_H/2], [sx - ISO_W/2, rsy],
-        depth, runTopRGB);
-
-      const runDepth = (runTopY - runBottomY + 1) * Y_SCALE;
-      pushWallFace(verts, sx, rsy, ISO_W/2, runDepth, run, runBrightness * 0.55, depth);
-      pushWallFace(verts, sx, rsy, -ISO_W/2, runDepth, run, runBrightness * 0.75, depth);
+    const offsets = FACE_OFFSETS[dirCode];
+    // (0,1,2) と (0,2,3) の2つの三角形で四角形の面を作る
+    const order = [0, 1, 2, 0, 2, 3];
+    for (const oi of order) {
+      const [ox, oy, oz] = offsets[oi];
+      verts.push(bx + ox, by + oy, bz + oz, r, g, b);
     }
   }
 
@@ -353,7 +300,7 @@ function buildGeometry() {
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
 
   if (truncated) {
-    setStatusText(`⚠️ データ量が多すぎたため、一部のタイルは描画を省略しました(頂点数上限 ${MAX_VERTS.toLocaleString()} に到達)`);
+    setStatusText(`⚠️ データ量が多すぎたため、一部の面は描画を省略しました(頂点数上限 ${MAX_VERTS.toLocaleString()} に到達)`);
   }
 }
 
@@ -373,15 +320,15 @@ function render() {
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
   const stride = 6 * 4;
   gl.enableVertexAttribArray(aPosLoc);
-  gl.vertexAttribPointer(aPosLoc, 2, gl.FLOAT, false, stride, 0);
-  gl.enableVertexAttribArray(aDepthLoc);
-  gl.vertexAttribPointer(aDepthLoc, 1, gl.FLOAT, false, stride, 8);
+  gl.vertexAttribPointer(aPosLoc, 3, gl.FLOAT, false, stride, 0);
   gl.enableVertexAttribArray(aColorLoc);
   gl.vertexAttribPointer(aColorLoc, 3, gl.FLOAT, false, stride, 12);
 
   gl.uniform2f(uPanLoc, panX, panY);
   gl.uniform1f(uZoomLoc, zoom);
   gl.uniform2f(uResLoc, canvas.width, canvas.height);
+  gl.uniform1f(uIsoOriginXLoc, isoOriginX);
+  gl.uniform1f(uDepthNormLoc, depthNorm);
 
   gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
 }
@@ -393,7 +340,7 @@ function applyTransform() {
   renderPlayerMarker();
 }
 
-// ui.js からの呼び出し互換用。ジオメトリは setRendererData() 時に
+// ui.js からの呼び出し互換用。ジオメトリは setRendererPaletteColors() 時に
 // 構築済みなので、ここでは再描画だけ行う。
 function drawIso() {
   render();
@@ -441,7 +388,7 @@ function setupPanZoom() {
   };
   viewport.onwheel = e => {
     e.preventDefault();
-    // マウスカーソルの位置を中心にズームする(以前は常に左上基準だった)
+    // マウスカーソルの位置を中心にズームする
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const isoX = (mx - panX) / zoom, isoY = (my - panY) / zoom;
@@ -456,6 +403,11 @@ function setupPanZoom() {
 
 // ============================================================
 // マウスホバーでのブロック名表示
+// ============================================================
+//
+// 描画そのものはもう「列」という概念を持たないボクセルメッシュだが、
+// ツールチップ用に軽量な「列ごとの一番上の面」インデックス(hoverIndex)を
+// 別途持っていて、それを使って近似的にブロックを特定する。
 // ============================================================
 
 function setupHover() {
@@ -472,7 +424,7 @@ function setupHover() {
     let best = null, bestDist = Infinity;
     for (let dx = -3; dx <= 3; dx++) {
       for (let dz = -3; dz <= 3; dz++) {
-        const cand = tileIndex.get((approxLx+dx) + '_' + (approxLz+dz));
+        const cand = hoverIndex.get((approxLx+dx) + '_' + (approxLz+dz));
         if (!cand) continue;
         const lx = cand.x - isoMinX, lz = cand.z - isoMinZ;
         const sx = (lx - lz) * ISO_W / 2 + isoOriginX;
@@ -484,10 +436,11 @@ function setupHover() {
     const t = (bestDist < (ISO_W * ISO_W)) ? best : null;
 
     if (t) {
+      const p = meshPalette[t.paletteIdx] || {};
       tooltip.style.display = 'block';
       tooltip.style.left = (e.clientX + 14) + 'px';
       tooltip.style.top = (e.clientY + 14) + 'px';
-      tooltip.innerText = `${t.root_name || '?'} (${t.x}, ${t.y}, ${t.z})`;
+      tooltip.innerText = `${p.root_name || '?'} (${t.x}, ${t.y}, ${t.z})`;
     } else {
       tooltip.style.display = 'none';
     }
