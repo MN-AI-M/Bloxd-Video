@@ -299,6 +299,187 @@ def build_map_from_decoded(res, id_to_root_path, asset_master_path, verbose=Fals
     return {'palette': palette_list, 'tiles': tiles}
 
 
+# ============================================================
+# v3: ボクセルメッシュ版(面カリング)
+# ============================================================
+#
+# 上のbuild_map_from_decoded()は「列ごとに高さ1つ+断面用の色データ」に
+# 圧縮する方式だった。これは普通の地形(起伏のある地面)には十分だが、
+# 「縦に離れた複数の建造物が同じ列にある」ようなケースを正しく表現できず、
+# 閾値で誤魔化す必要があった(装飾ノイズと本物の構造物の区別がつかないため)。
+#
+# 一般的なボクセルレンダラー(Minecraft系)がやっている方式に変更する:
+# 各ブロックについて、6方向の隣が「空気(または未記録)」かどうかを見て、
+# 空気に面している面だけを出力する(face culling)。
+# 地中に埋まってるブロックは面が1枚も出ないので、自動的に無視される。
+# 「かたまり」を検出する必要も、装飾ノイズ用の閾値も一切不要になる。
+
+# 面ごとの4隅のオフセット(ブロックのローカル座標を(0,0,0)〜(1,1,1)の
+# 単位立方体とみなした時の頂点)。JS側(renderer.js)で実際の頂点座標に展開する。
+# 巻き順は気にしない(バックフェイスカリングを使っていないため)。
+VOXEL_MESH_DIRS = [
+    ('+x', 1, 0, 0), ('-x', -1, 0, 0),
+    ('+y', 0, 1, 0), ('-y', 0, -1, 0),
+    ('+z', 0, 0, 1), ('-z', 0, 0, -1),
+]
+VOXEL_MESH_DIR_CODE = {name: i for i, (name, *_r) in enumerate(VOXEL_MESH_DIRS)}
+
+MAX_MESH_FACES = 1_500_000  # 頂点数が際限なく増えないための安全弁
+
+
+def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=False):
+    """既にmake_decoder()でデコード済みの res を受け取って、
+    {palette, faces, bbox, truncated} の辞書を返す。
+
+    faces: [[x, y, z, dirCode, paletteIdx], ...]
+        (x,y,z)はそのブロック自体のワールド座標(単位立方体の(0,0,0)側の角)。
+        dirCodeは0〜5(VOXEL_MESH_DIR_CODE参照)。
+        実際の頂点展開(面の4隅の計算)はJS側(renderer.js)で行う。
+    bbox: [minX, maxX, minY, maxY, minZ, maxZ] (地形が1つも無ければ全て0)
+    """
+    id_to_root = load_id_to_root(id_to_root_path)
+    asset_lookup = load_asset_lookup(asset_master_path)
+
+    palette_map, palette_list = {}, []
+
+    def palette_idx(block_id):
+        root, _ = id_to_root.get(str(block_id), (None, None))
+        asset = asset_lookup.get(root, {'texture': '', 'model': '', 'asset_type': ''}) if root else {'texture': '', 'model': '', 'asset_type': ''}
+        key = (root, asset['texture'], asset['model'], asset['asset_type'])
+        if key not in palette_map:
+            palette_map[key] = len(palette_list)
+            palette_list.append({'root_name': root, 'texture': asset['texture'], 'model': asset['model'], 'asset_type': asset['asset_type']})
+        return palette_map[key]
+
+    # 読み込まれてる全チャンク(chunkAdded)
+    chunk_events = {}
+    for t in res['ticks']:
+        for e in t['structuralEvents']:
+            if e['type'] == 'chunkAdded':
+                chunk_events[(e['chunkX'], e['chunkY'], e['chunkZ'])] = e
+
+    decoded_cache = {}
+    def get_chunk_blocks(key):
+        if key not in decoded_cache:
+            decoded_cache[key] = decode_rle(chunk_events[key]['rle']) if key in chunk_events else None
+        return decoded_cache[key]
+
+    # eP(実際のブロック変更イベント)。ワールド座標 -> blockId
+    # (AIR_IDなら「壊された」という意味)
+    edits = {}
+    for t in res['ticks']:
+        for e in t['structuralEvents']:
+            if e['type'] == 'eP':
+                x, y, z = e['pos']
+                edits[(x, y, z)] = e['toBlockId']
+
+    def get_block_slow(wx, wy, wz):
+        """チャンク境界をまたぐ隣接ブロックの参照用(遅いパス)。
+        None = 未記録(このチャンク自体が読み込まれていない) = 空気として扱う。"""
+        key3 = (wx, wy, wz)
+        if key3 in edits:
+            return edits[key3]
+        cx, lx = divmod(wx, CHUNK_SIZE)
+        cy, ly = divmod(wy, CHUNK_SIZE)
+        cz, lz = divmod(wz, CHUNK_SIZE)
+        blocks = get_chunk_blocks((cx, cy, cz))
+        if blocks is None:
+            return None
+        idx = lz + ly * CHUNK_SIZE + lx * CHUNK_SIZE * CHUNK_SIZE
+        return blocks[idx]
+
+    faces = []
+    minX = minY = minZ = None
+    maxX = maxY = maxZ = None
+    truncated = False
+
+    def note_bounds(wx, wy, wz):
+        nonlocal minX, maxX, minY, maxY, minZ, maxZ
+        if minX is None or wx < minX: minX = wx
+        if maxX is None or wx > maxX: maxX = wx
+        if minY is None or wy < minY: minY = wy
+        if maxY is None or wy > maxY: maxY = wy
+        if minZ is None or wz < minZ: minZ = wz
+        if maxZ is None or wz > maxZ: maxZ = wz
+
+    def emit_faces_for(wx, wy, wz, bid, blocks_local, lx, ly, lz):
+        """このブロックの6方向を調べて、空気(または未記録)に面してる方向だけ
+        facesに追加する。可能な限り、同じチャンク内で完結する隣接は
+        (divmodやチャンク検索を伴う)get_block_slowを使わず高速に判定する。"""
+        aidx = palette_idx(bid)
+        any_face = False
+        for name, dx, dy, dz in VOXEL_MESH_DIRS:
+            nlx, nly, nlz = lx + dx, ly + dy, lz + dz
+            if 0 <= nlx < CHUNK_SIZE and 0 <= nly < CHUNK_SIZE and 0 <= nlz < CHUNK_SIZE:
+                nwx, nwy, nwz = wx + dx, wy + dy, wz + dz
+                if edits and (nwx, nwy, nwz) in edits:
+                    nb = edits[(nwx, nwy, nwz)]
+                else:
+                    nidx = nlz + nly * CHUNK_SIZE + nlx * CHUNK_SIZE * CHUNK_SIZE
+                    nb = blocks_local[nidx]
+            else:
+                nb = get_block_slow(wx + dx, wy + dy, wz + dz)
+            if nb is None or nb == AIR_ID:
+                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx))
+                any_face = True
+        if any_face:
+            note_bounds(wx, wy, wz)
+        return len(faces) >= MAX_MESH_FACES
+
+    # 1. 地形本体: 読み込まれてる全チャンクの全ブロックを面カリング
+    for (cx, cy, cz) in chunk_events:
+        blocks = get_chunk_blocks((cx, cy, cz))
+        base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
+        for lx in range(CHUNK_SIZE):
+            wx = base_x + lx
+            for ly in range(CHUNK_SIZE):
+                wy = base_y + ly
+                row = lx * CHUNK_SIZE * CHUNK_SIZE + ly * CHUNK_SIZE
+                for lz in range(CHUNK_SIZE):
+                    bid = blocks[row + lz]
+                    if bid == AIR_ID:
+                        continue
+                    wz = base_z + lz
+                    if (wx, wy, wz) in edits:
+                        continue  # eP編集で上書き/削除済みなので、後段でまとめて処理する
+                    if emit_faces_for(wx, wy, wz, bid, blocks, lx, ly, lz):
+                        truncated = True
+                        break
+                if truncated: break
+            if truncated: break
+        if truncated: break
+
+    # 2. eP編集(手動で置かれた/壊されたブロック)
+    if not truncated:
+        for (wx, wy, wz), bid in edits.items():
+            if bid == AIR_ID:
+                continue
+            cx, lx = divmod(wx, CHUNK_SIZE)
+            cy, ly = divmod(wy, CHUNK_SIZE)
+            cz, lz = divmod(wz, CHUNK_SIZE)
+            blocks = get_chunk_blocks((cx, cy, cz))
+            if emit_faces_for(wx, wy, wz, bid, blocks, lx, ly, lz):
+                truncated = True
+                break
+
+    bbox = [minX or 0, maxX or 0, minY or 0, maxY or 0, minZ or 0, maxZ or 0]
+
+    if verbose:
+        print(f"読み込んだチャンク数: {len(chunk_events)}")
+        print(f"面(頂点用ポリゴン)数: {len(faces)}{'(上限到達により打ち切り)' if truncated else ''}")
+        print(f"パレット(ユニークな見た目)数: {len(palette_list)}")
+
+    return {'palette': palette_list, 'faces': faces, 'bbox': bbox, 'truncated': truncated}
+
+
+def build_voxel_mesh(replay_path, id_to_root_path, asset_master_path, out_path):
+    res = make_decoder(replay_path)
+    result = build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=True)
+    with open(out_path, 'w', encoding='utf-8') as f:
+        json.dump(result, f, ensure_ascii=False)
+    print(f"書き出し: {out_path}")
+
+
 if __name__ == '__main__':
     if len(sys.argv) < 5:
         print("使い方: python3 build_2d_map.py <replay.bloxdreplay> <block_id_to_root.csv> <asset_master.csv> <output.json>")
