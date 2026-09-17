@@ -56,8 +56,9 @@ let hoverIndex = null;
 // --- キャンバス / WebGL ---
 let canvas, gl, program, vbo;
 let playerCanvas, pctx;
-let aPosLoc, aColorLoc, uPanLoc, uZoomLoc, uResLoc, uIsoOriginXLoc, uDepthNormLoc;
+let aPosLoc, aColorLoc, aRevealTickLoc, uPanLoc, uZoomLoc, uResLoc, uIsoOriginXLoc, uDepthNormLoc, uCurrentTickLoc;
 let vertexCount = 0;
+let currentRevealTick = Infinity; // 今スクラブしてるtick。Infinityなら「全部表示」(タイムライン未選択時など)
 
 // --- 表示状態 ---
 let zoom = 1, panX = 0, panY = 0;
@@ -167,11 +168,13 @@ function buildHoverIndex() {
 const VERTEX_SHADER_SRC = `
   attribute vec3 aPos;   // ブロックのローカル座標 (lx, ly, lz)
   attribute vec3 aColor;
+  attribute float aRevealTick; // このブロックが置かれたtick番号
   uniform vec2 uPan;
   uniform float uZoom;
   uniform vec2 uResolution;
   uniform float uIsoOriginX;
   uniform float uDepthNorm;
+  uniform float uCurrentTick; // 今スクラブしてるtick(これより後に置かれた面は隠す)
   varying vec3 vColor;
 
   const float ISO_W = ${ISO_W.toFixed(1)};
@@ -190,7 +193,12 @@ const VERTEX_SHADER_SRC = `
     float rawDepth = (aPos.x + aPos.z) + aPos.y * DEPTH_Y_FACTOR;
     float depth = 1.0 - 2.0 * (rawDepth * uDepthNorm);
 
-    gl_Position = vec4(clip, depth, 1.0);
+    if (aRevealTick > uCurrentTick) {
+      // まだ置かれてない面はクリップ範囲の外に飛ばして、ラスタライズされないようにする
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    } else {
+      gl_Position = vec4(clip, depth, 1.0);
+    }
     vColor = aColor;
   }
 `;
@@ -227,11 +235,13 @@ function initGL() {
   }
   aPosLoc = gl.getAttribLocation(program, 'aPos');
   aColorLoc = gl.getAttribLocation(program, 'aColor');
+  aRevealTickLoc = gl.getAttribLocation(program, 'aRevealTick');
   uPanLoc = gl.getUniformLocation(program, 'uPan');
   uZoomLoc = gl.getUniformLocation(program, 'uZoom');
   uResLoc = gl.getUniformLocation(program, 'uResolution');
   uIsoOriginXLoc = gl.getUniformLocation(program, 'uIsoOriginX');
   uDepthNormLoc = gl.getUniformLocation(program, 'uDepthNorm');
+  uCurrentTickLoc = gl.getUniformLocation(program, 'uCurrentTick');
 
   vbo = gl.createBuffer();
   gl.enable(gl.DEPTH_TEST);
@@ -274,12 +284,14 @@ function buildGeometry() {
   if (!meshFaces || !paletteColorsRaw) return;
   const yRange = Math.max(1, isoMaxY - isoMinY);
   const verts = [];
+  const VERT_FLOATS = 7; // x,y,z, r,g,b, revealTick
   let truncated = false;
 
   for (const f of meshFaces) {
-    if (verts.length / 6 >= MAX_VERTS) { truncated = true; break; }
+    if (verts.length / VERT_FLOATS >= MAX_VERTS) { truncated = true; break; }
 
     const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4], scale = f[5] || 1;
+    const revealTick = f[6] || 0;
     const bx = wx - isoMinX, by = wy - isoMinY, bz = wz - isoMinZ;
 
     const brightness = (0.75 + 0.35 * (by / yRange)) * DIR_FACTOR[dirCode];
@@ -294,11 +306,11 @@ function buildGeometry() {
     const order = [0, 1, 2, 0, 2, 3];
     for (const oi of order) {
       const [ox, oy, oz] = offsets[oi];
-      verts.push(bx + ox * scale, by + oy, bz + oz * scale, r, g, b);
+      verts.push(bx + ox * scale, by + oy, bz + oz * scale, r, g, b, revealTick);
     }
   }
 
-  vertexCount = verts.length / 6;
+  vertexCount = verts.length / VERT_FLOATS;
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.STATIC_DRAW);
 
@@ -314,6 +326,11 @@ function buildGeometry() {
 
 function render() {
   if (!gl) return;
+  // タイムラインの再生位置(現在のtick)を、実際にブロックが置かれた
+  // tickと比較するために使う。まだ選ばれてなければ全部表示(Infinity)。
+  if (timeline && timeline.frames.length && timeline.frames[curTick]) {
+    currentRevealTick = timeline.frames[curTick].tick;
+  }
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.clearColor(0.051, 0.051, 0.063, 1);
   gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
@@ -321,17 +338,20 @@ function render() {
 
   gl.useProgram(program);
   gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
-  const stride = 6 * 4;
+  const stride = 7 * 4;
   gl.enableVertexAttribArray(aPosLoc);
   gl.vertexAttribPointer(aPosLoc, 3, gl.FLOAT, false, stride, 0);
   gl.enableVertexAttribArray(aColorLoc);
   gl.vertexAttribPointer(aColorLoc, 3, gl.FLOAT, false, stride, 12);
+  gl.enableVertexAttribArray(aRevealTickLoc);
+  gl.vertexAttribPointer(aRevealTickLoc, 1, gl.FLOAT, false, stride, 24);
 
   gl.uniform2f(uPanLoc, panX, panY);
   gl.uniform1f(uZoomLoc, zoom);
   gl.uniform2f(uResLoc, canvas.width, canvas.height);
   gl.uniform1f(uIsoOriginXLoc, isoOriginX);
   gl.uniform1f(uDepthNormLoc, depthNorm);
+  gl.uniform1f(uCurrentTickLoc, currentRevealTick);
 
   gl.drawArrays(gl.TRIANGLES, 0, vertexCount);
 }
