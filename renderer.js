@@ -288,10 +288,13 @@ function buildGeometry() {
 
     const offsets = FACE_OFFSETS[dirCode];
     // (0,1,2) と (0,2,3) の2つの三角形で四角形の面を作る
+    // scaleはX/Z(水平方向)だけに掛ける。Yはブロック1個ぶんの厚みのまま
+    // (Python側のLOD設定コメント参照: 縦方向までまとめると芝生/土のような
+    //  薄い層で代表色を取り違え、地面の色がおかしくなる問題があったため)。
     const order = [0, 1, 2, 0, 2, 3];
     for (const oi of order) {
       const [ox, oy, oz] = offsets[oi];
-      verts.push(bx + ox * scale, by + oy * scale, bz + oz * scale, r, g, b);
+      verts.push(bx + ox * scale, by + oy, bz + oz * scale, r, g, b);
     }
   }
 
