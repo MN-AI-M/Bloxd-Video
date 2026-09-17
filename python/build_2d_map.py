@@ -326,14 +326,60 @@ VOXEL_MESH_DIR_CODE = {name: i for i, (name, *_r) in enumerate(VOXEL_MESH_DIRS)}
 
 MAX_MESH_FACES = 1_500_000  # 頂点数が際限なく増えないための安全弁
 
+# --- LOD(Level of Detail)設定 ---
+# 録画中に記録された全エンティティの通った場所から水平距離LOD_NEAR_RADIUS
+# 以内はフル解像度(1ブロック=1面カリング単位)で描画する。それより遠い場所は
+# LOD_FACTOR x LOD_FACTOR x LOD_FACTOR ブロックを1つの塊として扱い、
+# 面の数を大きく減らす(遠方でこの塊自体も面カリングするので、完全に
+# 埋もれてる塊は今まで通り出力されない)。
+LOD_ENABLED = True
+LOD_NEAR_RADIUS = 50
+LOD_GRID_SIZE = 10          # 近傍判定用の粗いグリッドのマス目サイズ(近似判定でOK)
+LOD_FACTOR = 2
+LOD_ENTITY_SAMPLE_STRIDE = 20  # 全tickのうち何tickおきにプレイヤー位置をサンプルするか
+
+
+def _sample_entity_positions(res, stride):
+    """全エンティティの位置(差分形式)を復元しつつ、間引いてサンプリングする。
+    LODの近傍判定にしか使わないので、水平位置(x,z)だけ集めれば十分。"""
+    positions = []
+    state = {}  # entityId -> 現在のposition
+    for tick_num, t in enumerate(res['ticks']):
+        for entity_id, deltas in t.get('entities', {}).items():
+            for d in deltas:
+                if d['i'] == 2:  # 2 = position (build_all_timelines.pyのFIELD_NAMESと同じ規約)
+                    state[entity_id] = d['v']
+        if tick_num % stride == 0:
+            for pos in state.values():
+                if pos:
+                    positions.append((pos[0], pos[2]))
+    return positions
+
+
+def _build_near_cells(positions, radius, grid_size):
+    """サンプリングした(x,z)位置の集合から、そこから水平距離radius以内にある
+    粗いグリッドのマス目の集合を作る。この集合に入ってないマス目が「遠方」。"""
+    near_cells = set()
+    r_cells = radius // grid_size + 1
+    for (px, pz) in positions:
+        gcx, gcz = int(px // grid_size), int(pz // grid_size)
+        for dgx in range(-r_cells, r_cells + 1):
+            for dgz in range(-r_cells, r_cells + 1):
+                gx, gz = gcx + dgx, gcz + dgz
+                cx, cz = gx * grid_size + grid_size / 2, gz * grid_size + grid_size / 2
+                if (cx - px) ** 2 + (cz - pz) ** 2 <= radius * radius:
+                    near_cells.add((gx, gz))
+    return near_cells
+
 
 def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=False):
     """既にmake_decoder()でデコード済みの res を受け取って、
     {palette, faces, bbox, truncated} の辞書を返す。
 
-    faces: [[x, y, z, dirCode, paletteIdx], ...]
-        (x,y,z)はそのブロック自体のワールド座標(単位立方体の(0,0,0)側の角)。
-        dirCodeは0〜5(VOXEL_MESH_DIR_CODE参照)。
+    faces: [[x, y, z, dirCode, paletteIdx, scale], ...]
+        (x,y,z)はそのブロック(またはLODの塊)自体のワールド座標
+        (単位立方体の(0,0,0)側の角)。dirCodeは0〜5(VOXEL_MESH_DIR_CODE参照)。
+        scaleは1(フル解像度、1ブロック)か LOD_FACTOR(遠方の塊)。
         実際の頂点展開(面の4隅の計算)はJS側(renderer.js)で行う。
     bbox: [minX, maxX, minY, maxY, minZ, maxZ] (地形が1つも無ければ全て0)
     """
@@ -388,7 +434,20 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
         idx = lz + ly * CHUNK_SIZE + lx * CHUNK_SIZE * CHUNK_SIZE
         return blocks[idx]
 
+    # --- LOD: 「近く」判定の準備 ---
+    if LOD_ENABLED:
+        positions = _sample_entity_positions(res, LOD_ENTITY_SAMPLE_STRIDE)
+        near_cells = _build_near_cells(positions, LOD_NEAR_RADIUS, LOD_GRID_SIZE) if positions else None
+    else:
+        near_cells = None
+
+    def is_near(wx, wz):
+        if near_cells is None:
+            return True  # LOD無効、またはエンティティ位置が取れなかった場合は常にフル解像度
+        return (wx // LOD_GRID_SIZE, wz // LOD_GRID_SIZE) in near_cells
+
     faces = []
+    far_cells = {}  # (sx,sy,sz)スーパーセル座標 -> 代表のblockId(遠方=LOD用)
     minX = minY = minZ = None
     maxX = maxY = maxZ = None
     truncated = False
@@ -404,8 +463,8 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
 
     def emit_faces_for(wx, wy, wz, bid, blocks_local, lx, ly, lz):
         """このブロックの6方向を調べて、空気(または未記録)に面してる方向だけ
-        facesに追加する。可能な限り、同じチャンク内で完結する隣接は
-        (divmodやチャンク検索を伴う)get_block_slowを使わず高速に判定する。"""
+        facesに追加する(フル解像度)。可能な限り、同じチャンク内で完結する
+        隣接は(divmodやチャンク検索を伴う)get_block_slowを使わず高速に判定する。"""
         aidx = palette_idx(bid)
         any_face = False
         for name, dx, dy, dz in VOXEL_MESH_DIRS:
@@ -420,13 +479,24 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
             else:
                 nb = get_block_slow(wx + dx, wy + dy, wz + dz)
             if nb is None or nb == AIR_ID:
-                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx))
+                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, 1))
                 any_face = True
         if any_face:
             note_bounds(wx, wy, wz)
         return len(faces) >= MAX_MESH_FACES
 
-    # 1. 地形本体: 読み込まれてる全チャンクの全ブロックを面カリング
+    def process_voxel(wx, wy, wz, bid, blocks_local, lx, ly, lz):
+        """近く(フル解像度)か遠く(LOD)かを振り分ける。遠くはここでは
+        スーパーセルに登録するだけで、面カリングは全部集め終わってからまとめて行う
+        (隣のスーパーセルがまだ埋まってるかどうか、この時点では分からないため)。"""
+        if not is_near(wx, wz):
+            key = (wx // LOD_FACTOR, wy // LOD_FACTOR, wz // LOD_FACTOR)
+            if key not in far_cells:
+                far_cells[key] = bid
+            return False
+        return emit_faces_for(wx, wy, wz, bid, blocks_local, lx, ly, lz)
+
+    # 1. 地形本体: 読み込まれてる全チャンクの全ブロックを振り分け
     for (cx, cy, cz) in chunk_events:
         blocks = get_chunk_blocks((cx, cy, cz))
         base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
@@ -442,7 +512,7 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
                     wz = base_z + lz
                     if (wx, wy, wz) in edits:
                         continue  # eP編集で上書き/削除済みなので、後段でまとめて処理する
-                    if emit_faces_for(wx, wy, wz, bid, blocks, lx, ly, lz):
+                    if process_voxel(wx, wy, wz, bid, blocks, lx, ly, lz):
                         truncated = True
                         break
                 if truncated: break
@@ -458,7 +528,27 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
             cy, ly = divmod(wy, CHUNK_SIZE)
             cz, lz = divmod(wz, CHUNK_SIZE)
             blocks = get_chunk_blocks((cx, cy, cz))
-            if emit_faces_for(wx, wy, wz, bid, blocks, lx, ly, lz):
+            if process_voxel(wx, wy, wz, bid, blocks, lx, ly, lz):
+                truncated = True
+                break
+
+    # 3. 遠方(LOD)のスーパーセルを、改めて面カリングする。
+    #    (完全に他のスーパーセルに囲まれてる塊は、ここでもちゃんと出力されない)
+    if not truncated:
+        for (sx, sy, sz), bid in far_cells.items():
+            aidx = palette_idx(bid)
+            any_face = False
+            for name, dx, dy, dz in VOXEL_MESH_DIRS:
+                if (sx + dx, sy + dy, sz + dz) in far_cells:
+                    continue
+                wx, wy, wz = sx * LOD_FACTOR, sy * LOD_FACTOR, sz * LOD_FACTOR
+                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, LOD_FACTOR))
+                any_face = True
+            if any_face:
+                wx, wy, wz = sx * LOD_FACTOR, sy * LOD_FACTOR, sz * LOD_FACTOR
+                note_bounds(wx, wy, wz)
+                note_bounds(wx + LOD_FACTOR - 1, wy + LOD_FACTOR - 1, wz + LOD_FACTOR - 1)
+            if len(faces) >= MAX_MESH_FACES:
                 truncated = True
                 break
 
@@ -466,6 +556,7 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
 
     if verbose:
         print(f"読み込んだチャンク数: {len(chunk_events)}")
+        print(f"遠方(LOD)スーパーセル数: {len(far_cells)}")
         print(f"面(頂点用ポリゴン)数: {len(faces)}{'(上限到達により打ち切り)' if truncated else ''}")
         print(f"パレット(ユニークな見た目)数: {len(palette_list)}")
 
