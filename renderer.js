@@ -279,7 +279,7 @@ function buildGeometry() {
   for (const f of meshFaces) {
     if (verts.length / 6 >= MAX_VERTS) { truncated = true; break; }
 
-    const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4];
+    const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4], scale = f[5] || 1;
     const bx = wx - isoMinX, by = wy - isoMinY, bz = wz - isoMinZ;
 
     const brightness = (0.75 + 0.35 * (by / yRange)) * DIR_FACTOR[dirCode];
@@ -291,7 +291,7 @@ function buildGeometry() {
     const order = [0, 1, 2, 0, 2, 3];
     for (const oi of order) {
       const [ox, oy, oz] = offsets[oi];
-      verts.push(bx + ox, by + oy, bz + oz, r, g, b);
+      verts.push(bx + ox * scale, by + oy * scale, bz + oz * scale, r, g, b);
     }
   }
 
