@@ -300,7 +300,11 @@ function setupTopButtons() {
 function setupTimelineControls() {
   const scrub = document.getElementById('scrub');
   scrub.max = timeline.frames.length - 1;
-  scrub.addEventListener('input', e => { curTick = parseInt(e.target.value); renderPlayerMarker(); });
+  scrub.addEventListener('input', e => {
+    curTick = parseInt(e.target.value);
+    drawIso();          // このtickまでに置かれたブロックだけ表示されるよう再描画
+    renderPlayerMarker();
+  });
 
   document.getElementById('playBtn').addEventListener('click', () => {
     playing = !playing;
@@ -320,6 +324,7 @@ function playTick() {
     curTick = Math.min(curTick + ticksToAdvance, timeline.frames.length - 1);
     lastFrameTime = now;
     document.getElementById('scrub').value = curTick;
+    drawIso();          // このtickまでに置かれたブロックだけ表示されるよう再描画
     renderPlayerMarker();
     if (curTick >= timeline.frames.length - 1) {
       playing = false;
