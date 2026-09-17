@@ -380,10 +380,13 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
     """既にmake_decoder()でデコード済みの res を受け取って、
     {palette, faces, bbox, truncated} の辞書を返す。
 
-    faces: [[x, y, z, dirCode, paletteIdx, scale], ...]
+    faces: [[x, y, z, dirCode, paletteIdx, scale, revealTick], ...]
         (x,y,z)はそのブロック(またはLODの塊)自体のワールド座標
         (単位立方体の(0,0,0)側の角)。dirCodeは0〜5(VOXEL_MESH_DIR_CODE参照)。
-        scaleは1(フル解像度、1ブロック)か LOD_FACTOR(遠方の塊)。
+        scaleは1(フル解像度、1ブロック)か LOD_FACTOR_XZ(遠方の塊)。
+        revealTickは、このブロックが実際に置かれた(=見えるようになった)tick番号。
+        録画の再生位置がこのtickに達するまで、JS側でこの面を表示しないようにする
+        (「撮影中に追加されたブロックが最初から描画されている」問題への対応)。
         実際の頂点展開(面の4隅の計算)はJS側(renderer.js)で行う。
     bbox: [minX, maxX, minY, maxY, minZ, maxZ] (地形が1つも無ければ全て0)
     """
@@ -403,10 +406,14 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
 
     # 読み込まれてる全チャンク(chunkAdded)
     chunk_events = {}
-    for t in res['ticks']:
+    chunk_tick = {}   # (cx,cy,cz) -> 最初にchunkAddedされたtick番号(=このチャンクが最初に見えるようになった時刻)
+    for tick_num, t in enumerate(res['ticks']):
         for e in t['structuralEvents']:
             if e['type'] == 'chunkAdded':
-                chunk_events[(e['chunkX'], e['chunkY'], e['chunkZ'])] = e
+                key = (e['chunkX'], e['chunkY'], e['chunkZ'])
+                chunk_events[key] = e
+                if key not in chunk_tick:  # 再送されることがあるので、最初に見えた時刻を採用
+                    chunk_tick[key] = tick_num
 
     decoded_cache = {}
     def get_chunk_blocks(key):
@@ -415,13 +422,16 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
         return decoded_cache[key]
 
     # eP(実際のブロック変更イベント)。ワールド座標 -> blockId
-    # (AIR_IDなら「壊された」という意味)
+    # (AIR_IDなら「壊された」という意味)。edit_tickは「そのブロックが今の状態に
+    # なったtick」(同じ場所が複数回編集されてたら、最後の編集のtickを採用)。
     edits = {}
-    for t in res['ticks']:
+    edit_tick = {}
+    for tick_num, t in enumerate(res['ticks']):
         for e in t['structuralEvents']:
             if e['type'] == 'eP':
                 x, y, z = e['pos']
                 edits[(x, y, z)] = e['toBlockId']
+                edit_tick[(x, y, z)] = tick_num
 
     def get_block_slow(wx, wy, wz):
         """チャンク境界をまたぐ隣接ブロックの参照用(遅いパス)。
@@ -465,7 +475,7 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
         if minZ is None or wz < minZ: minZ = wz
         if maxZ is None or wz > maxZ: maxZ = wz
 
-    def emit_faces_for(wx, wy, wz, bid, blocks_local, lx, ly, lz):
+    def emit_faces_for(wx, wy, wz, bid, blocks_local, lx, ly, lz, reveal_tick):
         """このブロックの6方向を調べて、空気(または未記録)に面してる方向だけ
         facesに追加する(フル解像度)。可能な限り、同じチャンク内で完結する
         隣接は(divmodやチャンク検索を伴う)get_block_slowを使わず高速に判定する。"""
@@ -483,26 +493,28 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
             else:
                 nb = get_block_slow(wx + dx, wy + dy, wz + dz)
             if nb is None or nb == AIR_ID:
-                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, 1))
+                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, 1, reveal_tick))
                 any_face = True
         if any_face:
             note_bounds(wx, wy, wz)
         return len(faces) >= MAX_MESH_FACES
 
-    def process_voxel(wx, wy, wz, bid, blocks_local, lx, ly, lz):
+    def process_voxel(wx, wy, wz, bid, blocks_local, lx, ly, lz, chunk_key):
         """近く(フル解像度)か遠く(LOD)かを振り分ける。遠くはここでは
         スーパーセルに登録するだけで、面カリングは全部集め終わってからまとめて行う
         (隣のスーパーセルがまだ埋まってるかどうか、この時点では分からないため)。"""
+        reveal_tick = edit_tick.get((wx, wy, wz), chunk_tick.get(chunk_key, 0))
         if not is_near(wx, wz):
             key = (wx // LOD_FACTOR_XZ, wy, wz // LOD_FACTOR_XZ)  # Yはまとめない(理由は上のLOD設定コメント参照)
             if key not in far_cells:
-                far_cells[key] = bid
+                far_cells[key] = (bid, reveal_tick)
             return False
-        return emit_faces_for(wx, wy, wz, bid, blocks_local, lx, ly, lz)
+        return emit_faces_for(wx, wy, wz, bid, blocks_local, lx, ly, lz, reveal_tick)
 
     # 1. 地形本体: 読み込まれてる全チャンクの全ブロックを振り分け
-    for (cx, cy, cz) in chunk_events:
-        blocks = get_chunk_blocks((cx, cy, cz))
+    for chunk_key in chunk_events:
+        cx, cy, cz = chunk_key
+        blocks = get_chunk_blocks(chunk_key)
         base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
         for lx in range(CHUNK_SIZE):
             wx = base_x + lx
@@ -516,7 +528,7 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
                     wz = base_z + lz
                     if (wx, wy, wz) in edits:
                         continue  # eP編集で上書き/削除済みなので、後段でまとめて処理する
-                    if process_voxel(wx, wy, wz, bid, blocks, lx, ly, lz):
+                    if process_voxel(wx, wy, wz, bid, blocks, lx, ly, lz, chunk_key):
                         truncated = True
                         break
                 if truncated: break
@@ -532,21 +544,21 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
             cy, ly = divmod(wy, CHUNK_SIZE)
             cz, lz = divmod(wz, CHUNK_SIZE)
             blocks = get_chunk_blocks((cx, cy, cz))
-            if process_voxel(wx, wy, wz, bid, blocks, lx, ly, lz):
+            if process_voxel(wx, wy, wz, bid, blocks, lx, ly, lz, (cx, cy, cz)):
                 truncated = True
                 break
 
     # 3. 遠方(LOD)のスーパーセルを、改めて面カリングする。
     #    (完全に他のスーパーセルに囲まれてる塊は、ここでもちゃんと出力されない)
     if not truncated:
-        for (sx, sy, sz), bid in far_cells.items():
+        for (sx, sy, sz), (bid, reveal_tick) in far_cells.items():
             aidx = palette_idx(bid)
             any_face = False
             for name, dx, dy, dz in VOXEL_MESH_DIRS:
                 if (sx + dx, sy + dy, sz + dz) in far_cells:
                     continue
                 wx, wy, wz = sx * LOD_FACTOR_XZ, sy, sz * LOD_FACTOR_XZ
-                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, LOD_FACTOR_XZ))
+                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, LOD_FACTOR_XZ, reveal_tick))
                 any_face = True
             if any_face:
                 wx, wy, wz = sx * LOD_FACTOR_XZ, sy, sz * LOD_FACTOR_XZ
