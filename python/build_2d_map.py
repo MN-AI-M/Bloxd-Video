@@ -329,13 +329,17 @@ MAX_MESH_FACES = 1_500_000  # 頂点数が際限なく増えないための安�
 # --- LOD(Level of Detail)設定 ---
 # 録画中に記録された全エンティティの通った場所から水平距離LOD_NEAR_RADIUS
 # 以内はフル解像度(1ブロック=1面カリング単位)で描画する。それより遠い場所は
-# LOD_FACTOR x LOD_FACTOR x LOD_FACTOR ブロックを1つの塊として扱い、
 # 面の数を大きく減らす(遠方でこの塊自体も面カリングするので、完全に
 # 埋もれてる塊は今まで通り出力されない)。
+#
+# 統合するのは水平方向(X,Z)だけで、縦方向(Y)は統合しない(=1ブロックの
+# 厚みのまま)。地表は「芝生の下に土」のように薄い層が積み重なってることが
+# 多く、縦方向までまとめると代表色が誤って選ばれ(例: 遠くの地面がまだらに
+# 土色になる)ため。
 LOD_ENABLED = True
 LOD_NEAR_RADIUS = 50
 LOD_GRID_SIZE = 10          # 近傍判定用の粗いグリッドのマス目サイズ(近似判定でOK)
-LOD_FACTOR = 2
+LOD_FACTOR_XZ = 2           # 水平方向(X,Z)だけをこの倍率でまとめる。Yは常に1(統合しない)
 LOD_ENTITY_SAMPLE_STRIDE = 20  # 全tickのうち何tickおきにプレイヤー位置をサンプルするか
 
 
@@ -490,7 +494,7 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
         スーパーセルに登録するだけで、面カリングは全部集め終わってからまとめて行う
         (隣のスーパーセルがまだ埋まってるかどうか、この時点では分からないため)。"""
         if not is_near(wx, wz):
-            key = (wx // LOD_FACTOR, wy // LOD_FACTOR, wz // LOD_FACTOR)
+            key = (wx // LOD_FACTOR_XZ, wy, wz // LOD_FACTOR_XZ)  # Yはまとめない(理由は上のLOD設定コメント参照)
             if key not in far_cells:
                 far_cells[key] = bid
             return False
@@ -541,13 +545,13 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
             for name, dx, dy, dz in VOXEL_MESH_DIRS:
                 if (sx + dx, sy + dy, sz + dz) in far_cells:
                     continue
-                wx, wy, wz = sx * LOD_FACTOR, sy * LOD_FACTOR, sz * LOD_FACTOR
-                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, LOD_FACTOR))
+                wx, wy, wz = sx * LOD_FACTOR_XZ, sy, sz * LOD_FACTOR_XZ
+                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, LOD_FACTOR_XZ))
                 any_face = True
             if any_face:
-                wx, wy, wz = sx * LOD_FACTOR, sy * LOD_FACTOR, sz * LOD_FACTOR
+                wx, wy, wz = sx * LOD_FACTOR_XZ, sy, sz * LOD_FACTOR_XZ
                 note_bounds(wx, wy, wz)
-                note_bounds(wx + LOD_FACTOR - 1, wy + LOD_FACTOR - 1, wz + LOD_FACTOR - 1)
+                note_bounds(wx + LOD_FACTOR_XZ - 1, wy, wz + LOD_FACTOR_XZ - 1)
             if len(faces) >= MAX_MESH_FACES:
                 truncated = True
                 break
