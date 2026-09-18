@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投稿する — Bloxd Replay Editor</title>
+<link rel="stylesheet" href="community.css">
+</head>
+<body>
+
+<div class="wrap">
+  <header class="site-nav">
+    <a href="home.html" class="wordmark">
+      <svg class="mark" viewBox="0 0 24 24"><path d="M12 2 L21 7 L12 12 L3 7 Z" fill="#E8A33D"/><path d="M3 7 L12 12 L12 22 L3 17 Z" fill="#B87F2E"/><path d="M21 7 L12 12 L12 22 L21 17 Z" fill="#8F631F"/></svg>
+      Bloxd Replay Editor
+    </a>
+    <nav>
+      <a href="browse.html">投稿一覧</a>
+      <a href="submit.html" aria-current="page">投稿する</a>
+      <a href="index.html" class="cta">エディタを開く</a>
+    </nav>
+  </header>
+
+  <div class="form-page">
+    <h1>作ったものを共有する</h1>
+    <p class="lead">テクスチャ・ポーズ・エフェクト・シェーダーのどれかを投稿できます。誰でも見て、使えるようになります。</p>
+
+    <form id="postForm">
+      <div class="field">
+        <label>種類</label>
+        <div class="pill-row" id="kindPicker">
+          <button type="button" class="pill" data-kind="texture">テクスチャ</button>
+          <button type="button" class="pill" data-kind="pose">ポーズ</button>
+          <button type="button" class="pill" data-kind="effect">エフェクト</button>
+          <button type="button" class="pill" data-kind="shader">シェーダー</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>ファイル</label>
+        <div class="dropzone" id="dropzone">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4 L12 15 M8 8 L12 4 L16 8"/><path d="M4 15 L4 18 A2 2 0 0 0 6 20 L18 20 A2 2 0 0 0 20 18 L20 15"/></svg>
+          <div class="dz-main" id="dzMain">ここにファイルをドラッグ、またはクリックして選択</div>
+          <div class="dz-sub" id="dzSub">1ファイル、最大50MB</div>
+          <input type="file" id="fileInput" style="display:none;">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="titleInput">タイトル</label>
+        <input type="text" id="titleInput" placeholder="例: 溶岩洞窟のストーンテクスチャ" maxlength="200">
+      </div>
+
+      <div class="field">
+        <label for="authorInput">投稿者名(任意)</label>
+        <input type="text" id="authorInput" placeholder="名無し" maxlength="100">
+      </div>
+
+      <button type="submit" class="btn btn-primary" id="submitBtn">投稿する</button>
+      <div class="form-status" id="formStatus"></div>
+    </form>
+  </div>
+</div>
+
+<footer class="site-footer">
+  <div class="wrap" style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; width:100%;">
+    <span>Bloxd Replay Editor — ブラウザだけで動く、非公式のファンメイドツールです。</span>
+    <span><a href="index.html">エディタ</a> ・ <a href="browse.html">投稿一覧</a> ・ <a href="submit.html">投稿する</a></span>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="community.js"></script>
+<script>
+let selectedKind = null;
+let selectedFile = null;
+
+const kindPicker = document.getElementById('kindPicker');
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const dzMain = document.getElementById('dzMain');
+const dzSub = document.getElementById('dzSub');
+const formStatus = document.getElementById('formStatus');
+const submitBtn = document.getElementById('submitBtn');
+
+kindPicker.addEventListener('click', (e) => {
+  const btn = e.target.closest('.pill');
+  if (!btn) return;
+  kindPicker.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  selectedKind = btn.dataset.kind;
+});
+
+function setSelectedFile(file) {
+  selectedFile = file;
+  dropzone.classList.add('has-file');
+  dzMain.textContent = file.name;
+  dzSub.textContent = `${(file.size / 1024).toFixed(1)}KB ・ クリックして変更`;
+}
+
+dropzone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) setSelectedFile(fileInput.files[0]);
+});
+dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  if (e.dataTransfer.files[0]) setSelectedFile(e.dataTransfer.files[0]);
+});
+
+function showStatus(kind, message) {
+  formStatus.className = `form-status show ${kind}`;
+  formStatus.textContent = message;
+}
+
+document.getElementById('postForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const title = document.getElementById('titleInput').value.trim();
+  const author = document.getElementById('authorInput').value.trim();
+
+  if (!selectedKind) { showStatus('error', '種類を選んでください。'); return; }
+  if (!selectedFile) { showStatus('error', 'ファイルを選んでください。'); return; }
+  if (!title) { showStatus('error', 'タイトルを入力してください。'); return; }
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = '投稿中...';
+  formStatus.classList.remove('show');
+
+  try {
+    await uploadCommunityPost(selectedFile, selectedKind, title, author);
+    showStatus('success', '投稿しました。一覧に反映されています。');
+    document.getElementById('postForm').reset();
+    selectedFile = null;
+    selectedKind = null;
+    kindPicker.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+    dropzone.classList.remove('has-file');
+    dzMain.textContent = 'ここにファイルをドラッグ、またはクリックして選択';
+    dzSub.textContent = '1ファイル、最大50MB';
+  } catch (err) {
+    showStatus('error', '投稿できませんでした: ' + err.message);
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = '投稿する';
+  }
+});
+</script>
+</body>
+</html>

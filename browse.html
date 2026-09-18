@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投稿一覧 — Bloxd Replay Editor</title>
+<link rel="stylesheet" href="community.css">
+</head>
+<body>
+
+<div class="wrap">
+  <header class="site-nav">
+    <a href="home.html" class="wordmark">
+      <svg class="mark" viewBox="0 0 24 24"><path d="M12 2 L21 7 L12 12 L3 7 Z" fill="#E8A33D"/><path d="M3 7 L12 12 L12 22 L3 17 Z" fill="#B87F2E"/><path d="M21 7 L12 12 L12 22 L21 17 Z" fill="#8F631F"/></svg>
+      Bloxd Replay Editor
+    </a>
+    <nav>
+      <a href="browse.html" aria-current="page">投稿一覧</a>
+      <a href="submit.html">投稿する</a>
+      <a href="index.html" class="cta">エディタを開く</a>
+    </nav>
+  </header>
+
+  <div class="browse-header">
+    <h1>みんなが作ったもの</h1>
+    <div class="pill-row" id="filterPills">
+      <button type="button" class="pill active" data-kind="">すべて</button>
+      <button type="button" class="pill" data-kind="texture">テクスチャ</button>
+      <button type="button" class="pill" data-kind="pose">ポーズ</button>
+      <button type="button" class="pill" data-kind="effect">エフェクト</button>
+      <button type="button" class="pill" data-kind="shader">シェーダー</button>
+    </div>
+  </div>
+
+  <div class="browse-main">
+    <div id="postGrid" class="post-grid"></div>
+    <div class="load-more-row" id="loadMoreRow" style="display:none;">
+      <button type="button" class="btn btn-ghost" id="loadMoreBtn">もっと見る</button>
+    </div>
+  </div>
+</div>
+
+<footer class="site-footer">
+  <div class="wrap" style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:12px; width:100%;">
+    <span>Bloxd Replay Editor — ブラウザだけで動く、非公式のファンメイドツールです。</span>
+    <span><a href="index.html">エディタ</a> ・ <a href="browse.html">投稿一覧</a> ・ <a href="submit.html">投稿する</a></span>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="community.js"></script>
+<script src="community-ui.js"></script>
+<script>
+const PAGE_SIZE = 12;
+let currentKind = '';
+let cursor = null;
+
+const grid = document.getElementById('postGrid');
+const loadMoreRow = document.getElementById('loadMoreRow');
+const loadMoreBtn = document.getElementById('loadMoreBtn');
+const filterPills = document.getElementById('filterPills');
+
+async function loadPage(reset) {
+  if (reset) {
+    grid.innerHTML = '';
+    cursor = null;
+  }
+  loadMoreBtn.disabled = true;
+  loadMoreBtn.textContent = '読み込み中...';
+
+  try {
+    const posts = await listCommunityPosts(currentKind || null, { limit: PAGE_SIZE, before: cursor });
+
+    if (reset && posts.length === 0) {
+      grid.innerHTML = `
+        <div class="empty-state" style="grid-column:1/-1;">
+          <h3>まだ投稿がありません</h3>
+          <p>この種類の投稿はまだありません。最初の投稿者になりませんか。</p>
+          <a href="submit.html" class="btn btn-primary">投稿する</a>
+        </div>`;
+      loadMoreRow.style.display = 'none';
+      return;
+    }
+
+    for (const post of posts) grid.appendChild(buildPostCard(post));
+
+    if (posts.length === PAGE_SIZE) {
+      cursor = posts[posts.length - 1].created_at;
+      loadMoreRow.style.display = 'flex';
+    } else {
+      loadMoreRow.style.display = 'none';
+    }
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><h3>読み込めませんでした</h3><p>${e.message}</p></div>`;
+    loadMoreRow.style.display = 'none';
+  } finally {
+    loadMoreBtn.disabled = false;
+    loadMoreBtn.textContent = 'もっと見る';
+  }
+}
+
+filterPills.addEventListener('click', (e) => {
+  const btn = e.target.closest('.pill');
+  if (!btn) return;
+  filterPills.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  currentKind = btn.dataset.kind;
+  loadPage(true);
+});
+
+loadMoreBtn.addEventListener('click', () => loadPage(false));
+
+loadPage(true);
+</script>
+</body>
+</html>
