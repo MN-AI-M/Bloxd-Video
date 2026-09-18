@@ -376,9 +376,14 @@ def _build_near_cells(positions, radius, grid_size):
     return near_cells
 
 
-def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=False):
+def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=False, near_center=None):
     """既にmake_decoder()でデコード済みの res を受け取って、
     {palette, faces, bbox, truncated} の辞書を返す。
+
+    near_center: Noneなら今まで通り「録画中の全エンティティの通った場所」を
+        近傍判定の基準にする。(x, z)を渡すと、代わりにその座標を中心に
+        近傍判定する(自由カメラモードで、カメラの現在位置を中心に
+        LODを再計算する用)。
 
     faces: [[x, y, z, dirCode, paletteIdx, scale, revealTick], ...]
         (x,y,z)はそのブロック(またはLODの塊)自体のワールド座標
@@ -449,16 +454,23 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
         return blocks[idx]
 
     # --- LOD: 「近く」判定の準備 ---
-    if LOD_ENABLED:
+    if near_center is not None:
+        # 自由カメラモード: カメラの現在位置を中心にした単純な矩形判定
+        # (エンティティ位置のサンプリングは不要なので、もっと軽い)
+        ncx, ncz = near_center
+        def is_near(wx, wz):
+            return abs(wx - ncx) <= LOD_NEAR_RADIUS and abs(wz - ncz) <= LOD_NEAR_RADIUS
+    elif LOD_ENABLED:
         positions = _sample_entity_positions(res, LOD_ENTITY_SAMPLE_STRIDE)
         near_cells = _build_near_cells(positions, LOD_NEAR_RADIUS, LOD_GRID_SIZE) if positions else None
-    else:
-        near_cells = None
 
-    def is_near(wx, wz):
-        if near_cells is None:
-            return True  # LOD無効、またはエンティティ位置が取れなかった場合は常にフル解像度
-        return (wx // LOD_GRID_SIZE, wz // LOD_GRID_SIZE) in near_cells
+        def is_near(wx, wz):
+            if near_cells is None:
+                return True  # LOD無効、またはエンティティ位置が取れなかった場合は常にフル解像度
+            return (wx // LOD_GRID_SIZE, wz // LOD_GRID_SIZE) in near_cells
+    else:
+        def is_near(wx, wz):
+            return True
 
     faces = []
     far_cells = {}  # (sx,sy,sz)スーパーセル座標 -> 代表のblockId(遠方=LOD用)
