@@ -410,9 +410,14 @@ async function enterFreecam() {
       fcBuildGeometry();
       statusEl.innerText = '';
     } catch (e) {
-      statusEl.innerText = '⚠️ 自由視点の準備に失敗しました: ' + e.message;
+      // 画面をすぐ隠さない: エラー内容を読めるように自由視点の画面は
+      // 表示したままにする(前は即座にアイソメ表示へ戻していたので、
+      // エラーメッセージが一瞬しか見えず「チカッとして戻る」ように
+      // 見えていた)。コンソールにも詳しく出しておく。
+      console.error('自由視点の準備に失敗しました:', e);
+      statusEl.innerText = '⚠️ 自由視点の準備に失敗しました: ' + e.message +
+        '\n(詳細はブラウザのコンソールを確認してください。右上のボタンでアイソメ表示に戻れます)';
       fcActive = false;
-      overlay.classList.remove('active');
       return;
     }
   }
