@@ -96,11 +96,12 @@
 
 <!-- textures.zip をブラウザ内で展開するためのライブラリ(個々のpng配布の代わり) -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <!-- 表示の計算(座標変換・描画)は renderer.js、UI(アップロード・操作・Pyodide呼び出し)は ui.js。
      自由カメラ(一人称視点)モードは freecam.js に独立させてある。 -->
 <script src="renderer.js"></script>
 <script src="freecam.js"></script>
+<script src="community.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>
