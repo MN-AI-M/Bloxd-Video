@@ -4,14 +4,29 @@
 // renderer.js のアイソメトリック(平行投影)表示とは完全に別の、
 // 独立したWebGL描画パイプライン(本物の透視投影カメラ+実テクスチャ)。
 //
-// renderer.js が作った meshFaces / meshPalette / isoMinX,Y,Z をそのまま
-// 再利用してジオメトリを作る(座標の原点も同じものを使い、数値のズレが
+// renderer.js が作った meshFaces / meshPalette / isoMinX,Y,Z を初回の
+// ジオメトリとして再利用する(座標の原点も同じものを使い、数値のズレが
 // 出ないようにしてある)。tick同期の「まだ置かれてないブロックを隠す」
 // 仕組みも同じ考え方(頂点シェーダーでクリップ範囲外に飛ばす)を踏襲。
+//
+// v2: カメラが動くと、カメラの現在位置を中心にLOD(近く=フル解像度/
+//     遠く=間引き)を再計算するようにした(だいたい1チャンク動くごと)。
+//     録画中のプレイヤー位置基準のLOD(renderer.js側、アイソメ表示用)とは
+//     別物として、自前のfcMeshFaces/fcMeshPaletteで管理している。
 //
 // 操作: クリックでマウスキャプチャ開始、WASDで移動、Spaceで上昇、
 //       Shiftで下降、マウスで視点回転、Escでマウスキャプチャ終了。
 // ============================================================
+
+// renderer.js が作った meshFaces / meshPalette / isoMinX,Y,Z を最初のジオメトリ
+// として再利用するが、カメラが動くとカメラ位置中心でLODを再計算するため、
+// 自由カメラは自前のfcMeshFaces/fcMeshPaletteを持つ(renderer.js側の
+// アイソメトリック表示用データとは独立させてあり、混ざらないようにしてある)。
+let fcMeshFaces = null, fcMeshPalette = null;
+let fcLodCenter = null;      // 最後にLODを計算した中心(ワールド座標のx,z)
+let fcLodRebuilding = false; // 再計算が既に進行中かどうか(多重実行防止)
+
+const FC_LOD_REBUILD_DISTANCE = 32; // これだけ動いたらLODを再計算する(だいたい1チャンク分)
 
 let fcCanvas, fcGl, fcProgram, fcVbo, fcTexture;
 let fcAPosLoc, fcAUVLoc, fcABrightnessLoc, fcARevealTickLoc;
@@ -181,7 +196,7 @@ function fcUploadAtlasTexture() {
 // ============================================================
 
 function fcBuildGeometry() {
-  const paletteUVRects = meshPalette.map(p => (fcUVRectsRaw && fcUVRectsRaw.get(p.texture)) || [0, 0, 1, 1]);
+  const paletteUVRects = fcMeshPalette.map(p => (fcUVRectsRaw && fcUVRectsRaw.get(p.texture)) || [0, 0, 1, 1]);
   // FACE_OFFSETS(renderer.js)の各面の4隅(0,1,2,3)に対応するUV。
   // 面の向きごとの「正しい」貼り方までは追い込んでおらず、正方形をそのまま
   // 貼る簡易実装(石・土のような向きを気にしない見た目ならほぼ気にならない)。
@@ -189,7 +204,7 @@ function fcBuildGeometry() {
   const order = [0, 1, 2, 0, 2, 3];
   const verts = [];
 
-  for (const f of meshFaces) {
+  for (const f of fcMeshFaces) {
     const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4], scale = f[5] || 1, revealTick = f[6] || 0;
     const bx = wx - isoMinX, by = wy - isoMinY, bz = wz - isoMinZ;
     const rect = paletteUVRects[pIdx] || [0, 0, 1, 1];
@@ -288,6 +303,7 @@ function setupFreecamControls() {
 // ============================================================
 
 function fcUpdateStatus() {
+  if (fcLodRebuilding) return; // 「再計算中...」の表示を座標表示で上書きしないように
   const statusEl = document.getElementById('freecamStatus');
   if (!statusEl) return;
   const wx = Math.round(fcPos[0] + isoMinX), wy = Math.round(fcPos[1] + isoMinY), wz = Math.round(fcPos[2] + isoMinZ);
@@ -352,7 +368,58 @@ function freecamLoop(now) {
 
   renderFreecam();
   fcUpdateStatus();
+  fcMaybeRebuildLOD();
   fcAnimId = requestAnimationFrame(freecamLoop);
+}
+
+
+// ============================================================
+// カメラ位置に追従するLOD再計算
+// ============================================================
+// 自由カメラは今のアイソメ表示(プレイヤーが録画中に通った場所を中心にした
+// LOD)とは別に、カメラ自身の現在位置を中心にLODを再計算する。
+// 重いAvro/RLEデコードはやり直さず(web_glue._cached_resを使い回す)、
+// 面カリングだけをカメラ位置基準でやり直す軽い処理。
+// カメラがだいたい1チャンク分動くごとに1回だけ再計算する。
+
+function fcCameraWorldXZ() {
+  return [fcPos[0] + isoMinX, fcPos[2] + isoMinZ];
+}
+
+function fcMaybeRebuildLOD() {
+  if (fcLodRebuilding || typeof pyodide === 'undefined' || !pyodide) return;
+  const [wx, wz] = fcCameraWorldXZ();
+  if (fcLodCenter &&
+      Math.abs(wx - fcLodCenter[0]) < FC_LOD_REBUILD_DISTANCE &&
+      Math.abs(wz - fcLodCenter[1]) < FC_LOD_REBUILD_DISTANCE) {
+    return; // まだ前回の計算地点から十分近い
+  }
+
+  fcLodRebuilding = true;
+  const statusEl = document.getElementById('freecamStatus');
+  if (statusEl) statusEl.innerText = '周辺の地形を再計算中...';
+
+  // setTimeoutで1回ティックを空けて、上のステータス表示を画面に反映させてから
+  // 重い(同期的にメインスレッドを止める)Pyodide呼び出しを行う。
+  setTimeout(() => {
+    try {
+      pyodide.globals.set('_fc_cam_x', wx);
+      pyodide.globals.set('_fc_cam_z', wz);
+      const resultJson = pyodide.runPython(
+        'import web_glue\n' +
+        'web_glue.rebuild_mesh_near(_fc_cam_x, _fc_cam_z)'
+      );
+      const data = JSON.parse(resultJson);
+      fcMeshFaces = data.mesh.faces;
+      fcMeshPalette = data.mesh.palette;
+      fcLodCenter = [wx, wz];
+      fcBuildGeometry();
+    } catch (e) {
+      console.error('自由カメラ: LODの再計算に失敗しました', e);
+    } finally {
+      fcLodRebuilding = false;
+    }
+  }, 0);
 }
 
 
@@ -373,6 +440,11 @@ async function enterFreecam() {
   resizeFreecamCanvas();
 
   if (!fcTexture) {
+    // 初回だけ: アイソメ表示側の初期メッシュ(プレイヤーが録画中に通った
+    // 場所を中心にしたLOD)を、自由カメラの初期状態としてそのまま使う。
+    // 以降はカメラ自身の位置を中心に再計算していく(fcMaybeRebuildLOD)。
+    fcMeshFaces = meshFaces;
+    fcMeshPalette = meshPalette;
     try {
       statusEl.innerText = 'テクスチャを準備中...';
       await fcBuildTextureAtlas();
@@ -391,6 +463,9 @@ async function enterFreecam() {
   if (timeline && timeline.frames.length && timeline.frames[curTick]) {
     const f = timeline.frames[curTick];
     fcPos = [f.position[0] - isoMinX, f.position[1] - isoMinY + 2, f.position[2] - isoMinZ];
+    // 初期メッシュは既にこのあたりを中心にLOD計算済みなので、無駄な
+    // 再計算が即座に走らないよう「計算済み」地点として記録しておく
+    if (!fcLodCenter) fcLodCenter = [f.position[0], f.position[2]];
   }
 
   fcLastFrameTime = 0;
