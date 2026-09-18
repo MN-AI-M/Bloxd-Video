@@ -86,6 +86,9 @@ async function initPyodide() {
     statusEl.innerText = 'Python環境を準備中...(初回だけ少し時間がかかります)';
     pyodide = await loadPyodide();
 
+    statusEl.innerText = 'numpyを読み込み中...(地形の計算を高速化するため)';
+    await pyodide.loadPackage('numpy');
+
     statusEl.innerText = '解析用のPythonファイルを読み込み中...';
     for (const f of PYTHON_FILES) {
       const res = await fetch('./python/' + f);

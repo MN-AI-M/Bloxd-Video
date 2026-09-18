@@ -17,6 +17,7 @@ rleのデコード方式(ゲーム本体のJSソースから直接発見、確�
 """
 import sys, csv, json
 sys.path.insert(0, '.')
+import numpy as np
 from bloxdreplay_decode_full import make_decoder
 
 CHUNK_SIZE = 32
@@ -614,6 +615,75 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
 # 近く/遠くの判定は(build_voxel_mesh_from_decodedの既定パスと違って)
 # チャンク単位で行う。境界の精度は多少甘くなる(最大チャンク1個ぶん)が、
 # チャンクごとにキャッシュできるようになる方が実用上のメリットが大きい。
+# 6方向それぞれの (dir_code, 軸(0=x,1=y,2=z), 方向(+1/-1))
+_FACE_AXIS_DIR = [
+    (0, 0, 1), (1, 0, -1),   # +x, -x
+    (2, 1, 1), (3, 1, -1),   # +y, -y
+    (4, 2, 1), (5, 2, -1),   # +z, -z
+]
+
+
+def _chunk_exposed_faces_numpy(arr):
+    """arr: shape (32,32,32) のブロックID配列(axis順=x,y,z)。
+    戻り値: dir_code -> bool配列(32,32,32)。
+    True = そのボクセルはその方向に露出している「暫定」判定。
+    チャンクの端(隣のチャンクを見ないと確定できない面)は常にTrueにしてあり、
+    呼び出し側でget_block_slowを使って確定させる必要がある。
+    numpyの配列シフト+比較だけで済むので、Pythonのfor文で1ボクセルずつ
+    6方向をチェックするより大幅に速い(特に、面が1枚も出ない=完全に
+    埋もれてるボクセルの判定がタダ同然になる)。"""
+    solid = arr != AIR_ID
+    masks = {}
+    m = np.ones_like(solid); m[:-1, :, :] = ~solid[1:, :, :];  masks[0] = solid & m
+    m = np.ones_like(solid); m[1:, :, :]  = ~solid[:-1, :, :]; masks[1] = solid & m
+    m = np.ones_like(solid); m[:, :-1, :] = ~solid[:, 1:, :];  masks[2] = solid & m
+    m = np.ones_like(solid); m[:, 1:, :]  = ~solid[:, :-1, :]; masks[3] = solid & m
+    m = np.ones_like(solid); m[:, :, :-1] = ~solid[:, :, 1:];  masks[4] = solid & m
+    m = np.ones_like(solid); m[:, :, 1:]  = ~solid[:, :, :-1]; masks[5] = solid & m
+    return masks
+
+
+def _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, palette_idx_fn):
+    """1チャンクぶんの面を計算する(numpyで暫定判定→チャンクの端だけ
+    get_block_slowで確定、という2段構え)。戻り値は今まで通り
+    [(wx,wy,wz,dirCode,paletteIdx,1,revealTick), ...]。"""
+    masks = _chunk_exposed_faces_numpy(arr)
+    out = []
+
+    # このチャンクに出てくるユニークなblock_idぶんだけ、パレット変換をまとめて行う
+    solid_all = arr != AIR_ID
+    unique_ids = np.unique(arr[solid_all]) if solid_all.any() else np.empty(0, dtype=arr.dtype)
+    id_to_pidx = {int(bid): palette_idx_fn(int(bid)) for bid in unique_ids}
+
+    for dir_code, axis, direction in _FACE_AXIS_DIR:
+        xs, ys, zs = np.nonzero(masks[dir_code])
+        if len(xs) == 0:
+            continue
+        local = (xs, ys, zs)
+        boundary_val = CHUNK_SIZE - 1 if direction == 1 else 0
+        is_boundary = local[axis] == boundary_val
+
+        dx = direction if axis == 0 else 0
+        dy = direction if axis == 1 else 0
+        dz = direction if axis == 2 else 0
+
+        # チャンク内部(隣もこのチャンク内にあり、numpyの判定だけで確定済み)
+        for i in np.nonzero(~is_boundary)[0]:
+            lx, ly, lz = int(xs[i]), int(ys[i]), int(zs[i])
+            wx, wy, wz = base_x + lx, base_y + ly, base_z + lz
+            out.append((wx, wy, wz, dir_code, id_to_pidx[int(arr[lx, ly, lz])], 1, int(reveal_arr[lx, ly, lz])))
+
+        # チャンクの端(隣のチャンクを実際に見て確定させる必要がある)
+        for i in np.nonzero(is_boundary)[0]:
+            lx, ly, lz = int(xs[i]), int(ys[i]), int(zs[i])
+            wx, wy, wz = base_x + lx, base_y + ly, base_z + lz
+            nb = get_block_slow(wx + dx, wy + dy, wz + dz)
+            if nb is None or nb == AIR_ID:
+                out.append((wx, wy, wz, dir_code, id_to_pidx[int(arr[lx, ly, lz])], 1, int(reveal_arr[lx, ly, lz])))
+
+    return out
+
+
 def build_voxel_mesh_near_camera(res, id_to_root_path, asset_master_path, near_center, cache, verbose=False):
     """cache: build_voxel_mesh_from_decoded()のchunk_cache引数と同じ辞書を
     そのまま渡す想定(web_glue.py側で1回だけ作って使い回す)。
@@ -691,77 +761,50 @@ def build_voxel_mesh_near_camera(res, id_to_root_path, asset_master_path, near_c
         cache['edits_by_chunk'] = edits_by_chunk
     edits_by_chunk = cache['edits_by_chunk']
 
-    def compute_near_faces(chunk_key):
+    # チャンクの32^3配列(eP編集を適用済み)とreveal_tick配列を、numpy版の
+    # 面計算に使い回すためのキャッシュ
+    edited_array_cache = cache.setdefault('edited_arrays', {})
+    def get_chunk_array(chunk_key):
+        if chunk_key in edited_array_cache:
+            return edited_array_cache[chunk_key]
         blocks = get_chunk_blocks(chunk_key)
+        if blocks is None:
+            edited_array_cache[chunk_key] = (None, None)
+            return None, None
+        arr = np.asarray(blocks, dtype=np.int32).reshape(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE).copy()
+        reveal_arr = np.full((CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE), chunk_tick.get(chunk_key, 0), dtype=np.int64)
         cx, cy, cz = chunk_key
         base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
-        out = []
-        for lx in range(CHUNK_SIZE):
-            wx = base_x + lx
-            for ly in range(CHUNK_SIZE):
-                wy = base_y + ly
-                row = lx * CHUNK_SIZE * CHUNK_SIZE + ly * CHUNK_SIZE
-                for lz in range(CHUNK_SIZE):
-                    bid = blocks[row + lz]
-                    if bid == AIR_ID:
-                        continue
-                    wz = base_z + lz
-                    if (wx, wy, wz) in edits:
-                        continue
-                    aidx = palette_idx(bid)
-                    reveal_tick = chunk_tick.get(chunk_key, 0)
-                    for name, dx, dy, dz in VOXEL_MESH_DIRS:
-                        nlx, nly, nlz = lx + dx, ly + dy, lz + dz
-                        if 0 <= nlx < CHUNK_SIZE and 0 <= nly < CHUNK_SIZE and 0 <= nlz < CHUNK_SIZE:
-                            nwx, nwy, nwz = wx + dx, wy + dy, wz + dz
-                            if edits and (nwx, nwy, nwz) in edits:
-                                nb = edits[(nwx, nwy, nwz)]
-                            else:
-                                nidx = nlz + nly * CHUNK_SIZE + nlx * CHUNK_SIZE * CHUNK_SIZE
-                                nb = blocks[nidx]
-                        else:
-                            nb = get_block_slow(wx + dx, wy + dy, wz + dz)
-                        if nb is None or nb == AIR_ID:
-                            out.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, 1, reveal_tick))
         for (wx, wy, wz) in edits_by_chunk.get(chunk_key, []):
-            bid = edits[(wx, wy, wz)]
-            if bid == AIR_ID:
-                continue
-            aidx = palette_idx(bid)
-            reveal_tick = edit_tick[(wx, wy, wz)]
-            for name, dx, dy, dz in VOXEL_MESH_DIRS:
-                nb = get_block_slow(wx + dx, wy + dy, wz + dz)
-                if nb is None or nb == AIR_ID:
-                    out.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, 1, reveal_tick))
-        return out
+            lx, ly, lz = wx - base_x, wy - base_y, wz - base_z
+            arr[lx, ly, lz] = edits[(wx, wy, wz)]
+            reveal_arr[lx, ly, lz] = edit_tick[(wx, wy, wz)]
+        edited_array_cache[chunk_key] = (arr, reveal_arr)
+        return arr, reveal_arr
+
+    def compute_near_faces(chunk_key):
+        arr, reveal_arr = get_chunk_array(chunk_key)
+        if arr is None:
+            return []
+        cx, cy, cz = chunk_key
+        base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
+        return _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, palette_idx)
 
     def compute_far_cells(chunk_key):
-        blocks = get_chunk_blocks(chunk_key)
+        arr, reveal_arr = get_chunk_array(chunk_key)
+        if arr is None:
+            return {}
         cx, cy, cz = chunk_key
         base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
+        solid = arr != AIR_ID
+        xs, ys, zs = np.nonzero(solid)  # numpyで一括抽出(埋もれたブロックも含む全ての実ブロック)
         contrib = {}
-        reveal_tick = chunk_tick.get(chunk_key, 0)
-        for lx in range(CHUNK_SIZE):
-            wx = base_x + lx
-            for ly in range(CHUNK_SIZE):
-                wy = base_y + ly
-                row = lx * CHUNK_SIZE * CHUNK_SIZE + ly * CHUNK_SIZE
-                for lz in range(CHUNK_SIZE):
-                    bid = blocks[row + lz]
-                    if bid == AIR_ID:
-                        continue
-                    wz = base_z + lz
-                    if (wx, wy, wz) in edits:
-                        continue
-                    key = (wx // LOD_FACTOR_XZ, wy, wz // LOD_FACTOR_XZ)
-                    if key not in contrib:
-                        contrib[key] = (bid, reveal_tick)
-        for (wx, wy, wz) in edits_by_chunk.get(chunk_key, []):
-            bid = edits[(wx, wy, wz)]
-            if bid == AIR_ID:
-                continue
+        for i in range(len(xs)):
+            lx, ly, lz = int(xs[i]), int(ys[i]), int(zs[i])
+            wx, wy, wz = base_x + lx, base_y + ly, base_z + lz
             key = (wx // LOD_FACTOR_XZ, wy, wz // LOD_FACTOR_XZ)
-            contrib[key] = (bid, edit_tick[(wx, wy, wz)])
+            if key not in contrib:
+                contrib[key] = (int(arr[lx, ly, lz]), int(reveal_arr[lx, ly, lz]))
         return contrib
 
     ncx, ncz = near_center
