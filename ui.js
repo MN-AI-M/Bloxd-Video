@@ -290,6 +290,17 @@ function setupEntitySelector() {
 function setupTopButtons() {
   document.getElementById('fitBtn').onclick = () => fitToView();
   document.getElementById('gotoBtn').onclick = () => goToPlayer();
+
+  const freecamBtn = document.getElementById('freecamBtn');
+  freecamBtn.onclick = async () => {
+    if (isFreecamActive()) {
+      exitFreecam();
+      freecamBtn.innerText = '🎥 自由視点に切替';
+    } else {
+      freecamBtn.innerText = '🗺 アイソメ表示に戻る';
+      await enterFreecam();
+    }
+  };
 }
 
 
