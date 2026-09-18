@@ -20,6 +20,11 @@ v6: rebuild_mesh_near()を、チャンク単位キャッシュ版(build_voxel_me
     実際に計算するようにした(一度計算した場所に戻ってくれば、計算し直さず
     キャッシュがそのまま使われる)。
 
+v7: 自由カメラを常にフル解像度(LOD無し)にすることにしたので、
+    build_full_res_mesh()を追加。カメラが動いてもnear/farの分類自体が
+    変わらないため、rebuild_mesh_nearの呼び出しがそもそも不要になった
+    (アイソメ表示側は引き続きLODありのまま、影響しない)。
+
 今まで作った build_2d_map.py / build_all_timelines.py の処理を、
 ファイルへの書き込み無し(全部メモリ上)で呼べるようにまとめてある。
 """
@@ -35,15 +40,17 @@ ASSET_MASTER_PATH = "asset_master.csv"
 
 _cached_res = None    # process_replay_bytes()で一度デコードしたresを覚えておく(再デコード回避用)
 _chunk_cache = {}     # チャンクのデコード結果・自由カメラLODの計算結果をセッション全体で使い回すキャッシュ
+_fullres_chunk_cache = {}  # 自由カメラのフル解像度メッシュ専用のキャッシュ(_chunk_cacheとは別物)
 
 
 def process_replay_bytes(data: bytes) -> str:
     """.bloxdreplayの中身(バイト列)を受け取って、
     { mesh: {...}, timelines: {...} } のJSON文字列を返す。"""
-    global _cached_res, _chunk_cache
+    global _cached_res, _chunk_cache, _fullres_chunk_cache
     res = make_decoder_from_bytes(data)
     _cached_res = res  # rebuild_mesh_near()用に覚えておく
     _chunk_cache = {}  # 新しいファイルを読み込んだので、キャッシュは作り直す
+    _fullres_chunk_cache = {}
     mesh_data = build_voxel_mesh_from_decoded(
         res, BLOCK_ID_TO_ROOT_PATH, ASSET_MASTER_PATH, verbose=True, chunk_cache=_chunk_cache
     )
@@ -59,12 +66,36 @@ def rebuild_mesh_near(x: float, z: float) -> str:
 
     チャンク単位キャッシュ(_chunk_cache)を使い回すので、一度でも「近く」
     「遠く」どちらかとして計算したことのあるチャンクは、計算し直さずに
-    そのまま使われる(=同じ場所を行き来しても軽い)。"""
+    そのまま使われる(=同じ場所を行き来しても軽い)。
+
+    ※ 現在、自由カメラ側はLOD無し(build_full_res_mesh)に切り替えたため、
+    この関数はもう自由カメラからは呼ばれていない。将来また距離に応じた
+    軽量化をしたくなった時のために残してある。"""
     if _cached_res is None:
         raise RuntimeError("process_replay_bytesが先に呼ばれてないため、rebuild_mesh_nearは使えません")
     mesh_data = build_voxel_mesh_near_camera(
         _cached_res, BLOCK_ID_TO_ROOT_PATH, ASSET_MASTER_PATH,
         near_center=(x, z), cache=_chunk_cache, verbose=True
+    )
+    return json.dumps({"mesh": mesh_data}, ensure_ascii=False)
+
+
+def build_full_res_mesh() -> str:
+    """自由カメラモード用。LODを完全に無効化した(near_radius=inf)、
+    ワールド全体をフル解像度で含むメッシュを1回だけ作る。
+    カメラがどこに動いても近く/遠くの分類自体が変わらないので、
+    これ以降カメラが動くたびの再計算は一切不要になる。
+
+    process_replay_bytes()と同じ_cached_resを使うが、チャンクの再デコードを
+    避けるため専用のキャッシュ(_fullres_chunk_cache)を使う
+    (アイソメ表示用の_chunk_cacheと混ざらないように分けてある。
+    こちらは常時near_radius=infで呼ぶので、混ざると数値が食い違う)。"""
+    global _fullres_chunk_cache
+    if _cached_res is None:
+        raise RuntimeError("process_replay_bytesが先に呼ばれてないため、build_full_res_meshは使えません")
+    mesh_data = build_voxel_mesh_near_camera(
+        _cached_res, BLOCK_ID_TO_ROOT_PATH, ASSET_MASTER_PATH,
+        near_center=(0, 0), cache=_fullres_chunk_cache, verbose=True, near_radius=float('inf')
     )
     return json.dumps({"mesh": mesh_data}, ensure_ascii=False)
 

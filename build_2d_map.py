@@ -684,7 +684,7 @@ def _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, 
     return out
 
 
-def build_voxel_mesh_near_camera(res, id_to_root_path, asset_master_path, near_center, cache, verbose=False):
+def build_voxel_mesh_near_camera(res, id_to_root_path, asset_master_path, near_center, cache, verbose=False, near_radius=None):
     """cache: build_voxel_mesh_from_decoded()のchunk_cache引数と同じ辞書を
     そのまま渡す想定(web_glue.py側で1回だけ作って使い回す)。
     以下のキーを内部で使う(無ければ初回に作る):
@@ -694,7 +694,13 @@ def build_voxel_mesh_near_camera(res, id_to_root_path, asset_master_path, near_c
       cache['chunk_events'] / ['chunk_tick'] / ['edits'] / ['edit_tick']
       cache['palette_map'] / ['palette_list'] … パレットも使い回す(番号が
           呼び出しをまたいで安定するので、JS側の再構築コストも下がる)
+
+    near_radius: Noneなら通常のLOD_NEAR_RADIUSを使う。float('inf')を渡すと
+        全チャンクが常に「近く」判定になり、LOD自体が事実上無効になる
+        (=カメラがどこに動いても再計算が要らなくなる。自由カメラの
+        フル解像度モード用)。
     """
+    radius = LOD_NEAR_RADIUS if near_radius is None else near_radius
     id_to_root = load_id_to_root(id_to_root_path)
     asset_lookup = load_asset_lookup(asset_master_path)
 
@@ -813,7 +819,7 @@ def build_voxel_mesh_near_camera(res, id_to_root_path, asset_master_path, near_c
         base_x, base_z = cx * CHUNK_SIZE, cz * CHUNK_SIZE
         closest_x = min(max(ncx, base_x), base_x + CHUNK_SIZE - 1)
         closest_z = min(max(ncz, base_z), base_z + CHUNK_SIZE - 1)
-        return abs(closest_x - ncx) <= LOD_NEAR_RADIUS and abs(closest_z - ncz) <= LOD_NEAR_RADIUS
+        return abs(closest_x - ncx) <= radius and abs(closest_z - ncz) <= radius
 
     near_faces_cache = cache.setdefault('near_faces', {})
     far_cells_cache = cache.setdefault('far_cells', {})

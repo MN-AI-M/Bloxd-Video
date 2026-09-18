@@ -13,8 +13,6 @@ let allTimelines = null;
 let currentMesh = null;
 let textureColors = new Map();
 let playing = false, lastFrameTime = 0, animId = null;
-let pyodide = null;
-let pyodideReadyPromise = null;
 let textureUrls = null;           // ファイル名(拡張子なし) -> Blob URL
 let textureZipReadyPromise = null;
 
@@ -70,55 +68,75 @@ ensureTexturesLoading().catch(() => {});
 // ============================================================
 // Pyodide(ブラウザ内Python)の初期化
 // ============================================================
+// v2: Pyodideの実行をWeb Worker(pyodide-worker.js)に移した。今までは
+//     メインスレッド(画面描画やマウス操作を処理してるのと同じスレッド)で
+//     Pythonを同期的に呼んでたので、重い処理の間は操作が固まって見えていた。
+//     Worker内で実行することで、Pythonが計算してる間も画面やマウス操作が
+//     止まらなくなる。やり取りはpostMessage経由(リクエストごとにidを
+//     振って、対応するレスポンスを紐付ける)。
+// ============================================================
+
+let pyWorker = null;
+let pyodideReadyPromise = null;
+let pyodideReadyResolve = null;
+const pendingWorkerRequests = new Map(); // id -> {resolve, reject}
+let nextWorkerRequestId = 1;
 
 function ensurePyodideLoading() {
   if (!pyodideReadyPromise) {
-    pyodideReadyPromise = initPyodide();
+    pyodideReadyPromise = new Promise((resolve) => { pyodideReadyResolve = resolve; });
+    startPyWorker();
   }
   return pyodideReadyPromise;
 }
 
-async function initPyodide() {
+function startPyWorker() {
   const statusEl = document.getElementById('uploadStatus');
   const btn = document.getElementById('processBtn');
 
-  try {
-    statusEl.innerText = 'Python環境を準備中...(初回だけ少し時間がかかります)';
-    pyodide = await loadPyodide();
+  pyWorker = new Worker('pyodide-worker.js');
 
-    statusEl.innerText = 'numpyを読み込み中...(地形の計算を高速化するため)';
-    await pyodide.loadPackage('numpy');
-
-    statusEl.innerText = '解析用のPythonファイルを読み込み中...';
-    for (const f of PYTHON_FILES) {
-      const res = await fetch('./python/' + f);
-      if (!res.ok) throw new Error(`${f} の取得に失敗しました (HTTP ${res.status})`);
-      pyodide.FS.writeFile(f, await res.text());
+  pyWorker.onmessage = (event) => {
+    const msg = event.data;
+    if (msg.type === 'status') {
+      statusEl.innerText = msg.text;
+    } else if (msg.type === 'ready') {
+      btn.disabled = false;
+      btn.innerText = '読み込む';
+      pyodideReadyResolve();
+    } else if (msg.type === 'init_error') {
+      statusEl.innerText = 'Python環境の準備に失敗しました: ' + msg.message + '\nページを再読み込みしてやり直してください。';
+      btn.disabled = true;
+      btn.innerText = '準備に失敗しました';
+    } else if (msg.type === 'result') {
+      const p = pendingWorkerRequests.get(msg.id);
+      if (p) { pendingWorkerRequests.delete(msg.id); p.resolve(msg.result); }
+    } else if (msg.type === 'error') {
+      const p = pendingWorkerRequests.get(msg.id);
+      if (p) { pendingWorkerRequests.delete(msg.id); p.reject(new Error(msg.message)); }
     }
-    for (const f of CSV_FILES) {
-      const res = await fetch('./' + f);
-      if (!res.ok) throw new Error(`${f} の取得に失敗しました (HTTP ${res.status})`);
-      pyodide.FS.writeFile(f, await res.text());
-    }
-    pyodide.runPython('import web_glue');
+  };
 
-    statusEl.innerText = '準備完了。ファイルを選んで「読み込む」を押してください。';
-    btn.disabled = false;
-    btn.innerText = '読み込む';
-  } catch (e) {
+  pyWorker.onerror = (e) => {
     statusEl.innerText = 'Python環境の準備に失敗しました: ' + e.message + '\nページを再読み込みしてやり直してください。';
     btn.disabled = true;
     btn.innerText = '準備に失敗しました';
-    // このPromiseを失敗のまま握り続けないよう、次回呼び出しでもう一度試せるようにする
-    pyodideReadyPromise = null;
-    throw e;
-  }
+  };
+}
+
+// Workerにリクエストを送り、対応するレスポンスが来るまで待つ共通ヘルパー。
+// transferList を渡すと、その中身(例: バイト列のArrayBuffer)はコピー無しで
+// Workerに「移動」する(大きいファイルを送る時に効く)。
+function callPyWorker(type, payload, transferList) {
+  return new Promise((resolve, reject) => {
+    const id = nextWorkerRequestId++;
+    pendingWorkerRequests.set(id, { resolve, reject });
+    pyWorker.postMessage({ id, type, payload }, transferList || []);
+  });
 }
 
 // ページを開いたらすぐ裏でPyodideの準備を始めておく(体感速度のため)
-// 失敗時はinitPyodide内でステータス表示を更新済みなので、ここでは
-// コンソールへの未処理rejection警告を防ぐためだけにcatchしておく。
-ensurePyodideLoading().catch(() => {});
+ensurePyodideLoading();
 
 
 // ============================================================
@@ -141,12 +159,7 @@ document.getElementById('processBtn').addEventListener('click', async () => {
     const arrayBuffer = await file.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
 
-    pyodide.globals.set('_input_bytes', bytes);
-    const resultJson = pyodide.runPython(
-      'import web_glue\n' +
-      'web_glue.process_replay_bytes(bytes(_input_bytes))'
-    );
-    const data = JSON.parse(resultJson);
+    const data = await callPyWorker('process_replay', { bytes }, [bytes.buffer]);
 
     statusEl.innerText = '描画を準備中...';
 
