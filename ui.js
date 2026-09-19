@@ -10,11 +10,9 @@
 // ============================================================
 
 let allTimelines = null;
-let textureColors = new Map();
 let playing = false, lastFrameTime = 0, animId = null;
 let textureUrls = null;           // ファイル名(拡張子なし) -> Blob URL
 let textureZipReadyPromise = null;
-let textureColorsReadyPromise = null;
 let streamingDone = false;        // ストリーミング処理が最後まで終わったか
 
 const PYTHON_FILES = [
@@ -28,15 +26,10 @@ const CSV_FILES = ['block_id_to_root.csv', 'asset_master.csv'];
 
 
 // ============================================================
-// textures.zip の読み込み・展開・色抽出
+// textures.zip の読み込み・展開
 // 個々のpngをリポジトリに大量コミットする代わりに、1つのzipにまとめて
 // 置いておき、ブラウザ内(JSZip)で展開してBlob URLにする。
-// renderer.js からも window.getTextureUrl(name) で同じものを参照できる。
-//
-// v2: 地形の読み込みをストリーミング化したのに合わせて、テクスチャの
-//     色も「実際に使われてる分だけ後から解決する」のではなく、
-//     zipの中身を最初に全部サンプリングしておく方式にした
-//     (どの見た目が新しく出てきても、すぐ色を引けるようにするため)。
+// freecam.js がこれを使ってテクスチャアトラス(実際の見た目)を作る。
 // ============================================================
 
 function ensureTexturesLoading() {
@@ -64,54 +57,8 @@ async function loadTextureZip() {
   textureUrls = map;
 }
 
-// renderer.js(3D一人称視点など)から同じテクスチャを参照するための入口
-window.getTextureUrl = (name) => textureUrls ? textureUrls.get(name) : undefined;
-
-function ensureTextureColorsReady() {
-  if (!textureColorsReadyPromise) {
-    textureColorsReadyPromise = preloadAllTextureColors();
-  }
-  return textureColorsReadyPromise;
-}
-
-async function preloadAllTextureColors() {
-  await ensureTexturesLoading();
-
-  const sampleCanvas = document.createElement('canvas');
-  sampleCanvas.width = 1; sampleCanvas.height = 1;
-  const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
-
-  const promises = [];
-  for (const [texName, blobUrl] of textureUrls) {
-    promises.push(new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          sampleCtx.drawImage(img, 0, 0, 1, 1);
-          const [r, g, b] = sampleCtx.getImageData(0, 0, 1, 1).data;
-          textureColors.set(texName, `rgb(${r},${g},${b})`);
-        } catch (e) {
-          textureColors.set(texName, '#888');
-        }
-        resolve();
-      };
-      img.onerror = () => { textureColors.set(texName, '#a33'); resolve(); };
-      img.src = blobUrl;
-    }));
-  }
-  await Promise.all(promises);
-}
-
-// パレット配列(Python由来)を、解決済みの色文字列の配列に変換する。
-// zipに無かった/まだ解決できてないテクスチャはフォールバック色になる。
-function resolvePaletteColors(palette) {
-  return palette.map(p =>
-    textureColors.get(p.texture) || ((p.asset_type === '3d_model') ? '#7a4a2a' : '#444')
-  );
-}
-
-// ページを開いたらすぐ裏でzipの展開・色抽出も始めておく(Pyodideと並行)
-ensureTextureColorsReady().catch(() => {});
+// ページを開いたらすぐ裏でzipの展開も始めておく(Pyodideと並行)
+ensureTexturesLoading().catch(() => {});
 
 
 // ============================================================
@@ -219,19 +166,19 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 
   allTimelines = null;
   streamingDone = false;
-  startRendererStream();
+  startFreecamStream();
 
   let editorShown = false;
 
   try {
     statusEl.innerText = '準備しています...';
-    await Promise.all([ensurePyodideLoading(), ensureTextureColorsReady()]);
+    await Promise.all([ensurePyodideLoading(), ensureTexturesLoading()]);
 
     statusEl.innerText = 'リプレイを解析中...';
     const arrayBuffer = await file.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
 
-    await streamPyWorker('process_replay_streaming', { bytes }, [bytes.buffer], (partial) => {
+    await streamPyWorker('process_replay_streaming', { bytes }, [bytes.buffer], async (partial) => {
       handleStreamingPartial(partial);
 
       if (!editorShown && allTimelines && Object.keys(allTimelines.entities).length > 0) {
@@ -240,24 +187,18 @@ document.getElementById('processBtn').addEventListener('click', async () => {
         editorShown = true;
         document.getElementById('uploadScreen').classList.add('hidden');
         document.getElementById('editor').classList.add('active');
-        initCanvases();
-        setupTopButtons();
-        setupPanZoom();
-        setupHover();
-        setupTimelineControls();
+        document.getElementById('gotoBtn').onclick = () => fcGoToPlayer();
         setupEntitySelector();
-        fitToView();
-        renderPlayerMarker();
+        setupTimelineControls();
+        await initFreecamOnce();
       } else if (editorShown) {
-        // 継ぎ足された分をそのまま反映する
+        // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
+        // 再描画してるので、ここで明示的な再描画は不要)
         document.getElementById('scrub').max = timeline.frames.length - 1;
-        drawIso();
-        renderPlayerMarker();
       }
 
       if (partial.done) {
         streamingDone = true;
-        if (editorShown) fitToView(); // 全部揃ったので、最後にもう一度全体表示に合わせる
       }
     });
 
@@ -299,11 +240,10 @@ function handleStreamingPartial(partial) {
     }
   }
 
-  const resolvedColors = resolvePaletteColors(partial.palette);
-  appendRendererFaces(partial.new_faces, partial.palette, resolvedColors);
+  appendFreecamStreamFaces(partial.new_faces, partial.palette);
 
   const pct = partial.total_ticks ? Math.round(100 * partial.processed_tick / partial.total_ticks) : 100;
-  const faceCountText = `面数: ${(meshFaces ? meshFaces.length : 0).toLocaleString()}`;
+  const faceCountText = `面数: ${(fcMeshFaces ? fcMeshFaces.length : 0).toLocaleString()}`;
   if (partial.truncated) {
     setStatusText(`⚠️ データ量が多すぎたため、途中で打ち切りました(${pct}%まで処理・${faceCountText}）`);
   } else if (partial.done) {
@@ -339,45 +279,22 @@ function setupEntitySelector() {
     setRendererTimeline(allTimelines.entities[sel.value]);
     document.getElementById('scrub').max = timeline.frames.length - 1;
     document.getElementById('scrub').value = 0;
-    drawIso();
-    renderPlayerMarker();
   });
   setRendererTimeline(allTimelines.entities[sel.value]);
 }
 
 
 // ============================================================
-// 画面上部のボタン(全体表示・プレイヤーへ移動・視点モード切替)
-// ============================================================
-
-function setupTopButtons() {
-  document.getElementById('fitBtn').onclick = () => fitToView();
-  document.getElementById('gotoBtn').onclick = () => goToPlayer();
-
-  const freecamBtn = document.getElementById('freecamBtn');
-  freecamBtn.onclick = async () => {
-    if (isFreecamActive()) {
-      exitFreecam();
-      freecamBtn.innerText = '🎥 自由視点に切替';
-    } else {
-      freecamBtn.innerText = '🗺 アイソメ表示に戻る';
-      await enterFreecam();
-    }
-  };
-}
-
-
-// ============================================================
 // タイムライン操作(再生・スクラブ)
 // ============================================================
+// 自由カメラは毎フレーム自分で再描画してる(freecamLoop)ので、ここでは
+// curTick/timelineの状態を更新するだけで良い(明示的な再描画呼び出しは不要)。
 
 function setupTimelineControls() {
   const scrub = document.getElementById('scrub');
   scrub.max = timeline.frames.length - 1;
   scrub.addEventListener('input', e => {
     curTick = parseInt(e.target.value);
-    drawIso();          // このtickまでに置かれたブロックだけ表示されるよう再描画
-    renderPlayerMarker();
   });
 
   document.getElementById('playBtn').addEventListener('click', () => {
@@ -401,8 +318,6 @@ function playTick() {
     lastFrameTime = now;
     document.getElementById('scrub').value = curTick;
     document.getElementById('scrub').max = maxAvailable;
-    drawIso();          // このtickまでに置かれたブロックだけ表示されるよう再描画
-    renderPlayerMarker();
     if (curTick >= maxAvailable) {
       if (streamingDone) {
         // 本当にここで終わり
@@ -423,7 +338,7 @@ function playTick() {
 // ============================================================
 
 function setStatusText(text) {
-  document.getElementById('info').innerText = text;
+  document.getElementById('loadStatus').innerText = text;
 }
 
 function updateFrameInfo(f) {

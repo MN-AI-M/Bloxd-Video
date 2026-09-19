@@ -1,35 +1,22 @@
 // freecam.js
 // ============================================================
-// 自由カメラ(プレイ画面のような一人称視点)モード。
-// renderer.js のアイソメトリック(平行投影)表示とは完全に別の、
-// 独立したWebGL描画パイプライン(本物の透視投影カメラ+実テクスチャ)。
+// 自由カメラ(プレイ画面のような一人称視点)。
 //
-// renderer.js が使ってる isoMinX,Y,Z(座標の原点)だけ引き続き参照して
-// 数値のズレが出ないようにしてあるが、メッシュ本体(fcMeshFaces/
-// fcMeshPalette)は自前で持つ。tick同期の「まだ置かれてないブロックを
-// 隠す」仕組みは同じ考え方(頂点シェーダーでクリップ範囲外に飛ばす)を踏襲。
-//
-// v3: 自由カメラはワールド全体を常にフル解像度(LOD無し)で読み込むように
-//     した(web_glue.build_full_res_mesh())。以前はカメラの現在位置を
-//     中心に約1チャンク動くごとにLODを再計算していたが、その都度
-//     Pyodideの同期呼び出しでメインスレッドが止まる体感の重さがあった。
-//     ワールド全体を最初から持っておけば、それ以降カメラがどこに動いても
-//     再計算が一切不要になる(トレードオフ: 非常に大きいワールドだと
-//     頂点数の上限(MAX_VERTS)に達して一部が省略される可能性がある。
-//     アイソメ表示側は引き続きLODありのままで、こちらの変更の影響は
-//     受けない)。
+// v4: アイソメトリック表示(renderer.js)を廃止し、これが唯一の
+//     描画パイプラインになった。両方とも「常にフル解像度」で中身が
+//     同じになったので、二重に持つ意味が無くなったため。
+//     ストリーミング(build_2d_map.StreamingMeshProcessor)から届く
+//     面を、届くたびにそのままこちらのジオメトリに継ぎ足す
+//     (startFreecamStream / appendFreecamStreamFaces)。
+//     shared.js の FACE_OFFSETS・DIR_FACTOR・worldOriginX,Y,Z・
+//     timeline・curTick を共有して使う。
 //
 // 操作: クリックでマウスキャプチャ開始、WASDで移動、Spaceで上昇、
 //       Shiftで下降、マウスで視点回転、Escでマウスキャプチャ終了。
 // ============================================================
 
-// v2: 自由カメラはワールド全体を常にフル解像度(LOD無し)で読み込む。
-// web_glue.build_full_res_mesh()(near_radius=inf)を1回だけ呼んで
-// fcMeshFaces/fcMeshPaletteに持つので、カメラがどこに動いても
-// 近く/遠くの分類自体が変わらず、再計算が一切不要になった。
-// renderer.js側(アイソメ表示、こちらは引き続きLODあり)のisoMinX,Y,Zだけは
-// 座標系を揃えるために引き続き参照する。
-let fcMeshFaces = null, fcMeshPalette = null;
+let fcMeshFaces = [], fcMeshPalette = [];
+let fcVertexData = []; // 全部たまってる頂点データ(浮動小数点の配列)
 
 let fcCanvas, fcGl, fcProgram, fcVbo, fcTexture;
 let fcAPosLoc, fcAUVLoc, fcABrightnessLoc, fcARevealTickLoc;
@@ -37,12 +24,13 @@ let fcUViewLoc, fcUProjLoc, fcUTextureLoc, fcUCurrentTickLoc;
 let fcVertexCount = 0;
 let fcUVRectsRaw = null;   // texName -> [u0,v0,u1,v1] (アトラス内の位置)
 let fcAtlasCanvas = null;
-let fcActive = false;
+let fcAtlasReadyPromise = null;
+let fcActive = false;      // 初期化済みかどうか(今はトグルではなく、1回きりの初期化フラグ)
 let fcAnimId = null;
 let fcLastFrameTime = 0;
 let fcKeys = {};
 let fcYaw = 0, fcPitch = 0;
-let fcPos = [0, 20, 0]; // isoMinX,Y,Zからの相対座標(renderer.jsのメッシュ座標系と揃えてある)
+let fcPos = [0, 20, 0]; // worldOriginX,Y,Zからの相対座標
 
 const FC_MOVE_SPEED = 25; // ブロック/秒
 const FC_MOUSE_SENSITIVITY = 0.0025;
@@ -92,7 +80,7 @@ function fcCompileShader(type, src) {
   if (!fcGl.getShaderParameter(s, fcGl.COMPILE_STATUS)) {
     const info = fcGl.getShaderInfoLog(s);
     fcGl.deleteShader(s);
-    throw new Error('自由視点シェーダーのコンパイルに失敗しました: ' + info);
+    throw new Error('シェーダーのコンパイルに失敗しました: ' + info);
   }
   return s;
 }
@@ -101,7 +89,7 @@ function initFreecamGL() {
   fcCanvas = document.getElementById('freecamCanvas');
   fcGl = fcCanvas.getContext('webgl') || fcCanvas.getContext('experimental-webgl');
   if (!fcGl) {
-    document.getElementById('freecamStatus').innerText = '⚠️ このブラウザ/端末ではWebGLが使えないため自由視点モードは使えません。';
+    document.getElementById('freecamStatus').innerText = '⚠️ このブラウザ/端末ではWebGLが使えません。別のブラウザ(Chrome/Firefox等)でお試しください。';
     return false;
   }
   const vs = fcCompileShader(fcGl.VERTEX_SHADER, FC_VERTEX_SHADER_SRC);
@@ -111,7 +99,7 @@ function initFreecamGL() {
   fcGl.attachShader(fcProgram, fs);
   fcGl.linkProgram(fcProgram);
   if (!fcGl.getProgramParameter(fcProgram, fcGl.LINK_STATUS)) {
-    throw new Error('自由視点シェーダープログラムのリンクに失敗しました: ' + fcGl.getProgramInfoLog(fcProgram));
+    throw new Error('シェーダープログラムのリンクに失敗しました: ' + fcGl.getProgramInfoLog(fcProgram));
   }
   fcAPosLoc = fcGl.getAttribLocation(fcProgram, 'aPos');
   fcAUVLoc = fcGl.getAttribLocation(fcProgram, 'aUV');
@@ -127,25 +115,33 @@ function initFreecamGL() {
   fcGl.depthFunc(fcGl.LESS);
 
   setupFreecamControls();
-  window.addEventListener('resize', () => { if (fcActive) resizeFreecamCanvas(); });
+  window.addEventListener('resize', () => { if (fcGl) resizeFreecamCanvas(); });
   return true;
 }
 
 function resizeFreecamCanvas() {
-  const overlay = document.getElementById('freecamOverlay');
-  fcCanvas.width = Math.max(1, overlay.clientWidth);
-  fcCanvas.height = Math.max(1, overlay.clientHeight);
+  const area = document.getElementById('freecamArea');
+  fcCanvas.width = Math.max(1, area.clientWidth);
+  fcCanvas.height = Math.max(1, area.clientHeight);
 }
 
 
 // ============================================================
 // テクスチャアトラス(実際のpngをまとめて1枚のWebGLテクスチャにする)
+// zip内の全テクスチャを対象にする(どのパレットにも依存しないので、
+// ストリーミングでパレットが後から増えても作り直さなくて良い)。
 // ============================================================
 
-async function fcBuildTextureAtlas() {
-  const neededTextures = new Set();
-  for (const p of fcMeshPalette) if (p.texture) neededTextures.add(p.texture);
-  const names = Array.from(neededTextures);
+function ensureFreecamAtlasReady() {
+  if (!fcAtlasReadyPromise) {
+    fcAtlasReadyPromise = buildFreecamTextureAtlas();
+  }
+  return fcAtlasReadyPromise;
+}
+
+async function buildFreecamTextureAtlas() {
+  await ensureTexturesLoading(); // ui.js: zipの展開(textureUrlsを埋める)
+  const names = Array.from(textureUrls.keys());
 
   const cell = 64;
   const cols = Math.max(1, Math.ceil(Math.sqrt(names.length)));
@@ -168,8 +164,7 @@ async function fcBuildTextureAtlas() {
       col / cols + padU, row / rows + padV,
       (col + 1) / cols - padU, (row + 1) / rows - padV,
     ]);
-    const url = (typeof getTextureUrl === 'function') ? getTextureUrl(texName) : undefined;
-    if (!url) return;
+    const url = textureUrls.get(texName);
     promises.push(new Promise((resolve) => {
       const img = new Image();
       img.onload = () => { actx.drawImage(img, col * cell, row * cell, cell, cell); resolve(); };
@@ -195,21 +190,41 @@ function fcUploadAtlasTexture() {
 
 
 // ============================================================
-// ジオメトリ(meshFaces + UVアトラスの位置から頂点バッファを作る)
+// ジオメトリ(ストリーミングで届いた面を継ぎ足していく)
 // ============================================================
 
-function fcBuildGeometry() {
+function startFreecamStream() {
+  fcMeshFaces = [];
+  fcMeshPalette = [];
+  fcVertexData = [];
+  fcVertexCount = 0;
+  resetWorldOrigin();
+  if (fcGl) {
+    fcGl.bindBuffer(fcGl.ARRAY_BUFFER, fcVbo);
+    fcGl.bufferData(fcGl.ARRAY_BUFFER, new Float32Array(0), fcGl.DYNAMIC_DRAW);
+  }
+}
+
+// newFaces: 今回新しく分かった面([[x,y,z,dirCode,paletteIdx,scale,revealTick],...])
+// newPalette: 現時点での完全なパレット配列(毎回全体を受け取る想定)
+function appendFreecamStreamFaces(newFaces, newPalette) {
+  fcMeshPalette = newPalette;
+  if (!newFaces.length) return;
+
+  if (!worldOriginSet) {
+    setWorldOrigin(newFaces[0][0], newFaces[0][1], newFaces[0][2]);
+  }
+
   const paletteUVRects = fcMeshPalette.map(p => (fcUVRectsRaw && fcUVRectsRaw.get(p.texture)) || [0, 0, 1, 1]);
-  // FACE_OFFSETS(renderer.js)の各面の4隅(0,1,2,3)に対応するUV。
   // 面の向きごとの「正しい」貼り方までは追い込んでおらず、正方形をそのまま
   // 貼る簡易実装(石・土のような向きを気にしない見た目ならほぼ気にならない)。
   const cornerUV = [[0, 1], [1, 1], [1, 0], [0, 0]];
   const order = [0, 1, 2, 0, 2, 3];
-  const verts = [];
 
-  for (const f of fcMeshFaces) {
+  for (const f of newFaces) {
+    fcMeshFaces.push(f);
     const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4], scale = f[5] || 1, revealTick = f[6] || 0;
-    const bx = wx - isoMinX, by = wy - isoMinY, bz = wz - isoMinZ;
+    const bx = wx - worldOriginX, by = wy - worldOriginY, bz = wz - worldOriginZ;
     const rect = paletteUVRects[pIdx] || [0, 0, 1, 1];
     const brightness = DIR_FACTOR[dirCode];
     const offsets = FACE_OFFSETS[dirCode];
@@ -218,13 +233,15 @@ function fcBuildGeometry() {
       const [cu, cv] = cornerUV[oi];
       const u = rect[0] + cu * (rect[2] - rect[0]);
       const v = rect[1] + cv * (rect[3] - rect[1]);
-      verts.push(bx + ox * scale, by + oy, bz + oz * scale, u, v, brightness, revealTick);
+      fcVertexData.push(bx + ox * scale, by + oy, bz + oz * scale, u, v, brightness, revealTick);
     }
   }
 
-  fcVertexCount = verts.length / 7;
-  fcGl.bindBuffer(fcGl.ARRAY_BUFFER, fcVbo);
-  fcGl.bufferData(fcGl.ARRAY_BUFFER, new Float32Array(verts), fcGl.STATIC_DRAW);
+  fcVertexCount = fcVertexData.length / 7;
+  if (fcGl) {
+    fcGl.bindBuffer(fcGl.ARRAY_BUFFER, fcVbo);
+    fcGl.bufferData(fcGl.ARRAY_BUFFER, new Float32Array(fcVertexData), fcGl.DYNAMIC_DRAW);
+  }
 }
 
 
@@ -308,7 +325,7 @@ function setupFreecamControls() {
 function fcUpdateStatus() {
   const statusEl = document.getElementById('freecamStatus');
   if (!statusEl) return;
-  const wx = Math.round(fcPos[0] + isoMinX), wy = Math.round(fcPos[1] + isoMinY), wz = Math.round(fcPos[2] + isoMinZ);
+  const wx = Math.round(fcPos[0] + worldOriginX), wy = Math.round(fcPos[1] + worldOriginY), wz = Math.round(fcPos[2] + worldOriginZ);
   statusEl.innerText = `座標: (${wx}, ${wy}, ${wz})`;
 }
 
@@ -317,7 +334,7 @@ function renderFreecam() {
   fcGl.viewport(0, 0, fcCanvas.width, fcCanvas.height);
   fcGl.clearColor(0.4, 0.63, 0.9, 1); // 空っぽい水色(単色描画より馴染むように)
   fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
-  if (fcVertexCount === 0) return;
+  if (fcVertexCount === 0 || !fcTexture) return;
 
   fcGl.useProgram(fcProgram);
   fcGl.bindBuffer(fcGl.ARRAY_BUFFER, fcVbo);
@@ -370,76 +387,51 @@ function freecamLoop(now) {
 
   renderFreecam();
   fcUpdateStatus();
+  if (timeline && timeline.frames.length && timeline.frames[curTick] && typeof updateFrameInfo === 'function') {
+    updateFrameInfo(timeline.frames[curTick]);
+  }
   fcAnimId = requestAnimationFrame(freecamLoop);
 }
 
 
 // ============================================================
-// 入口(ui.js から呼ぶ)
+// 初期化・操作(ui.js から呼ぶ)
 // ============================================================
 
-async function enterFreecam() {
-  const overlay = document.getElementById('freecamOverlay');
-  const statusEl = document.getElementById('freecamStatus');
-  overlay.classList.add('active');
+// リプレイの読み込みが始まったタイミングで1回だけ呼ぶ
+// (WebGL・テクスチャアトラスの準備、ジオメトリのリセット)
+async function initFreecamOnce() {
+  if (fcActive) return; // 既に初期化済み(2つ目のファイルを読み込んだ場合など)
+  if (!initFreecamGL()) return;
   fcActive = true;
   fcKeys = {};
-
-  if (!fcGl) {
-    if (!initFreecamGL()) { fcActive = false; return; }
-  }
   resizeFreecamCanvas();
 
-  if (!fcTexture) {
-    // 初回だけ: web_glue.build_full_res_mesh()で、LOD無し(ワールド全体を
-    // フル解像度で含む)メッシュを1回だけ作る。これで以降カメラがどこに
-    // 動いても再計算が一切不要になる。Pyodide自体はWorker(pyodide-worker.js)
-    // の中で動いてるので、この計算中も画面やマウス操作は止まらない。
-    try {
-      statusEl.innerText = 'Python環境の準備を待っています...';
-      await ensurePyodideLoading();
-
-      statusEl.innerText = '地形を準備中...(初回だけ少し時間がかかります)';
-      const data = await callPyWorker('build_full_res_mesh', {});
-      fcMeshFaces = data.mesh.faces;
-      fcMeshPalette = data.mesh.palette;
-
-      statusEl.innerText = 'テクスチャを準備中...';
-      await fcBuildTextureAtlas();
-      fcUploadAtlasTexture();
-      fcBuildGeometry();
-      statusEl.innerText = '';
-    } catch (e) {
-      // 画面をすぐ隠さない: エラー内容を読めるように自由視点の画面は
-      // 表示したままにする(前は即座にアイソメ表示へ戻していたので、
-      // エラーメッセージが一瞬しか見えず「チカッとして戻る」ように
-      // 見えていた)。コンソールにも詳しく出しておく。
-      console.error('自由視点の準備に失敗しました:', e);
-      statusEl.innerText = '⚠️ 自由視点の準備に失敗しました: ' + e.message +
-        '\n(詳細はブラウザのコンソールを確認してください。右上のボタンでアイソメ表示に戻れます)';
-      fcActive = false;
-      return;
-    }
+  // 既にジオメトリが継ぎ足され始めてる場合、今ある分をすぐアップロードしておく
+  if (fcVertexData.length > 0) {
+    fcGl.bindBuffer(fcGl.ARRAY_BUFFER, fcVbo);
+    fcGl.bufferData(fcGl.ARRAY_BUFFER, new Float32Array(fcVertexData), fcGl.DYNAMIC_DRAW);
   }
 
-  // プレイヤーの現在位置あたりから開始する
-  if (timeline && timeline.frames.length && timeline.frames[curTick]) {
-    const f = timeline.frames[curTick];
-    fcPos = [f.position[0] - isoMinX, f.position[1] - isoMinY + 2, f.position[2] - isoMinZ];
+  try {
+    await ensureFreecamAtlasReady();
+    fcUploadAtlasTexture();
+  } catch (e) {
+    console.error('テクスチャアトラスの準備に失敗しました:', e);
+    document.getElementById('freecamStatus').innerText = '⚠️ テクスチャの準備に失敗しました: ' + e.message;
   }
+
+  fcGoToPlayer();
 
   fcLastFrameTime = 0;
   if (fcAnimId) cancelAnimationFrame(fcAnimId);
   fcAnimId = requestAnimationFrame(freecamLoop);
 }
 
-function exitFreecam() {
-  fcActive = false;
-  if (fcAnimId) cancelAnimationFrame(fcAnimId);
-  if (document.pointerLockElement === fcCanvas) document.exitPointerLock();
-  document.getElementById('freecamOverlay').classList.remove('active');
-}
-
-function isFreecamActive() {
-  return fcActive;
+// カメラをプレイヤーの現在位置あたりに移動する
+function fcGoToPlayer() {
+  if (timeline && timeline.frames.length && timeline.frames[curTick]) {
+    const f = timeline.frames[curTick];
+    fcPos = [f.position[0] - worldOriginX, f.position[1] - worldOriginY + 2, f.position[2] - worldOriginZ];
+  }
 }
