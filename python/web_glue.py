@@ -61,10 +61,24 @@ def start_streaming_replay(data: bytes) -> None:
     batch()をdoneになるまで繰り返し呼ぶ。"""
     global _cached_res, _chunk_cache, _fullres_chunk_cache, _streaming_processor
     res = make_decoder_from_bytes(data)
+
+    # bloxdreplay_decode_full.make_decoder()は、デコード中にエラーが
+    # 起きても例外を投げず、result['_error']に詰めて返すだけの作りになってる
+    # (どこまで読めたかを保持するため)。ここでチェックしないと、
+    # 「デコードが実質失敗してる(ticksがほぼ空)」のに気づかないまま
+    # 「プレイヤーの情報が見つからない」という紛らわしいエラーになるので、
+    # ここで明示的にチェックして、実際の原因が分かるようにする。
+    decode_error = res.get('_error')
+    n_ticks = len(res.get('ticks', []))
+    if decode_error and n_ticks == 0:
+        # 1tickも読めてない=致命的。ここで打ち切ってエラーにする
+        raise RuntimeError(f"リプレイのデコードに失敗しました(1tickも読めませんでした): {decode_error}")
+
     _cached_res = res  # rebuild_mesh_near()/build_full_res_mesh()用に覚えておく
     _chunk_cache = {}  # 新しいファイルを読み込んだので、キャッシュは作り直す
     _fullres_chunk_cache = {}
     _streaming_processor = StreamingMeshProcessor(res, BLOCK_ID_TO_ROOT_PATH, ASSET_MASTER_PATH)
+    _streaming_processor.decode_error = decode_error  # 部分的に読めてた場合、最後に警告として伝える
 
 
 def process_next_streaming_batch(batch_ticks: int = 500) -> str:
@@ -118,7 +132,15 @@ def rebuild_mesh_near(x: float, z: float) -> str:
 
 
 def build_full_res_mesh() -> str:
+    """自由カメラモード用。LODを完全に無効化した(near_radius=inf)、
+    ワールド全体をフル解像度で含むメッシュを1回だけ作る。
+    カメラがどこに動いても近く/遠くの分類自体が変わらないので、
+    これ以降カメラが動くたびの再計算は一切不要になる。
 
+    process_replay_bytes()と同じ_cached_resを使うが、チャンクの再デコードを
+    避けるため専用のキャッシュ(_fullres_chunk_cache)を使う
+    (アイソメ表示用の_chunk_cacheと混ざらないように分けてある。
+    こちらは常時near_radius=infで呼ぶので、混ざると数値が食い違う)。"""
     global _fullres_chunk_cache
     if _cached_res is None:
         raise RuntimeError("process_replay_bytesが先に呼ばれてないため、build_full_res_meshは使えません")

@@ -644,10 +644,17 @@ def _chunk_exposed_faces_numpy(arr):
     return masks
 
 
-def _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, palette_idx_fn):
+def _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, palette_idx_fn, on_missing=None):
     """1チャンクぶんの面を計算する(numpyで暫定判定→チャンクの端だけ
     get_block_slowで確定、という2段構え)。戻り値は今まで通り
-    [(wx,wy,wz,dirCode,paletteIdx,1,revealTick), ...]。"""
+    [(wx,wy,wz,dirCode,paletteIdx,1,revealTick), ...]。
+
+    on_missing: 省略可。チャンクの端の面が「隣のチャンクがまだ存在しない」
+    (get_block_slowがNoneを返した)という理由で露出扱いになった時、
+    on_missing(face, missing_chunk_key) が呼ばれる。ストリーミング処理で、
+    後から隣のチャンクが実際に来た時にこの面を撤回するかどうか判断する
+    のに使う(呼び出し側=StreamingMeshProcessorが使う。他の呼び出し元は
+    全チャンクが揃ってから呼ぶので、この暫定判定自体が起こらず気にしなくて良い)。"""
     masks = _chunk_exposed_faces_numpy(arr)
     out = []
 
@@ -678,9 +685,14 @@ def _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, 
         for i in np.nonzero(is_boundary)[0]:
             lx, ly, lz = int(xs[i]), int(ys[i]), int(zs[i])
             wx, wy, wz = base_x + lx, base_y + ly, base_z + lz
-            nb = get_block_slow(wx + dx, wy + dy, wz + dz)
+            nwx, nwy, nwz = wx + dx, wy + dy, wz + dz
+            nb = get_block_slow(nwx, nwy, nwz)
             if nb is None or nb == AIR_ID:
-                out.append((wx, wy, wz, dir_code, id_to_pidx[int(arr[lx, ly, lz])], 1, int(reveal_arr[lx, ly, lz])))
+                face = (wx, wy, wz, dir_code, id_to_pidx[int(arr[lx, ly, lz])], 1, int(reveal_arr[lx, ly, lz]))
+                out.append(face)
+                if nb is None and on_missing is not None:
+                    missing_key = (nwx // CHUNK_SIZE, nwy // CHUNK_SIZE, nwz // CHUNK_SIZE)
+                    on_missing(face, missing_key)
 
     return out
 
@@ -920,13 +932,26 @@ class StreamingMeshProcessor:
         self.pending_edits = {}       # (x,y,z) -> 最後に見たblockId(最後にまとめて処理する)
         self.pending_edit_tick = {}
 
-        # 新しく見つかったチャンクは、その場ですぐ面を計算せず1バッチぶん
-        # 待ってから計算する(最初のバッチだけは体感速度優先で即時処理する)。
-        # こうすることで、隣接チャンクが次のバッチまでに見つかってれば、
-        # 境界の判定を正しく行える(=チャンクが別バッチにまたがって発見された
-        # 時に境界へ薄い余分な面が残る問題を大きく減らせる)。
+        # 新しく見つかったチャンクは、その場ですぐ面を計算せず常に1バッチぶん
+        # 待ってから計算する。こうすることで、隣接チャンクが次のバッチまでに
+        # 見つかってれば、境界の判定を正しく行える確率が上がる(完全ではない。
+        # それでも取りこぼした分はprovisional_faces/retracted_facesで訂正する)。
         self.pending_chunk_queue = []
-        self.is_first_batch = True
+
+        # チャンクの端の面を「隣のチャンクがまだ無い」という理由で暫定的に
+        # 露出扱いにした時、missing_chunk_key -> [face, ...] の形で覚えておく。
+        # 後から実際にそのチャンクが来たら、この面は撤回が必要かもしれない
+        # (=境界に薄い余分な面が残る問題を、確率的な軽減ではなく確実に直す)。
+        self.provisional_faces = {}
+
+        # ある位置(x,y,z)について、チャンク処理(_emit_chunk_faces)で
+        # 一度でも面を出したことがあれば記録しておく。後からその位置が
+        # eP編集されてると分かった時点で「撤回対象」として報告し、
+        # JS側で該当する面を消してもらう(正しい状態は_finalize_edits()が
+        # 別途出す)。タイミング(最初のバッチの即時処理・編集が判明する前に
+        # チャンクを処理し終えてた場合など)に関係なく、最終的に必ず
+        # 正しい状態にするための仕組み。
+        self.chunk_emitted_positions = set()
 
         self.entity_state = {}
         self.entities_out = {}
@@ -935,6 +960,7 @@ class StreamingMeshProcessor:
         self.total_ticks = len(res['ticks'])
         self.done = False
         self.truncated = False
+        self.decode_error = None  # web_glue.start_streaming_replay()が、部分的なデコード失敗を検知したらここに入れる
 
         self.minX = self.minY = self.minZ = None
         self.maxX = self.maxY = self.maxZ = None
@@ -990,12 +1016,31 @@ class StreamingMeshProcessor:
         if blocks is None:
             return []
         arr = np.asarray(blocks, dtype=np.int32).reshape(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE)
-        reveal_arr = np.full((CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE), self.chunk_tick.get(chunk_key, 0), dtype=np.int64)
         cx, cy, cz = chunk_key
         base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
-        faces = _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, self._get_block_slow, self._palette_idx)
+
+        # このチャンク内の位置が(今の時点までに)eP編集されてたら、ここでは
+        # 「無い」ものとして扱う(_finalize_edits()側が、編集後の正しい値で
+        # 別途まとめて処理する)。これをしないと、壊された/置き換えられた
+        # ブロックが編集前のまま面として出てしまい、_finalize_edits()の分と
+        # 二重に描画されてしまう(実際にテストで確認したバグ)。
+        if self.pending_edits:
+            arr = arr.copy()
+            for (ex, ey, ez) in self.pending_edits:
+                if (base_x <= ex < base_x + CHUNK_SIZE and
+                        base_y <= ey < base_y + CHUNK_SIZE and
+                        base_z <= ez < base_z + CHUNK_SIZE):
+                    arr[ex - base_x, ey - base_y, ez - base_z] = AIR_ID
+
+        reveal_arr = np.full((CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE), self.chunk_tick.get(chunk_key, 0), dtype=np.int64)
+
+        def on_missing(face, missing_key):
+            self.provisional_faces.setdefault(missing_key, []).append(face)
+
+        faces = _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, self._get_block_slow, self._palette_idx, on_missing=on_missing)
         for f in faces:
             self._note_bounds(f[0], f[1], f[2])
+            self.chunk_emitted_positions.add((f[0], f[1], f[2]))
         return faces
 
     def _finalize_edits(self):
@@ -1029,11 +1074,14 @@ class StreamingMeshProcessor:
         チャンク」にしてある(今回新しく見つかった分は、次回に回す)。
         こうすることで、隣接チャンクが「次のバッチ」で見つかった場合でも、
         面を計算する時点では既にchunk_eventsに反映済みになっており、
-        正しく境界判定できる。最初のバッチだけは、体感速度を優先して
-        その場ですぐ計算する(最後のバッチでは、待ってた分をまとめて出す)。"""
+        正しく境界判定できる(最後のバッチでは、待ってた分をまとめて出す)。
+        それでも解決しきれない「編集の判明がチャンクの面計算より後になる」
+        ケースは、retracted_positions(下記)で対応する。"""
         new_faces = []
         entity_frame_updates = {}  # entityId -> 今回追加されたフレームのリスト
         newly_discovered_chunks = []  # このバッチで新しく見つかった(まだ面を計算してない)チャンク
+        retracted_positions = []  # 既に面を出した後で編集が判明した位置(全方向を撤回)
+        retracted_faces = []      # 「隣のチャンクがまだ無い」前提で暫定的に出してた面(その1方向だけ撤回)
 
         start_tick = self.next_tick
         end_tick = min(self.total_ticks, start_tick + batch_ticks)
@@ -1050,10 +1098,18 @@ class StreamingMeshProcessor:
                         self.chunk_tick[key] = tick_num
                     if key not in self.emitted_chunks:
                         newly_discovered_chunks.append(key)
+                    # このチャンクが「まだ無い」前提で暫定的に出されてた面があれば撤回する
+                    retracted_faces.extend(self.provisional_faces.pop(key, []))
                 elif e['type'] == 'eP':
                     x, y, z = e['pos']
+                    is_new_edit_position = (x, y, z) not in self.pending_edits
                     self.pending_edits[(x, y, z)] = e['toBlockId']
                     self.pending_edit_tick[(x, y, z)] = tick_num
+                    # この位置について、既にチャンク処理側で(編集前の値のまま)
+                    # 面を出してしまってた場合、その面は撤回してもらう必要がある
+                    # (正しい状態は_finalize_edits()が別途出す)
+                    if is_new_edit_position and (x, y, z) in self.chunk_emitted_positions:
+                        retracted_positions.append((x, y, z))
 
             for entity_id, deltas in t.get('entities', {}).items():
                 state = self.entity_state.setdefault(entity_id, {})
@@ -1070,17 +1126,14 @@ class StreamingMeshProcessor:
                 self.entities_out[entity_id]['displayName'] = state.get(1)
                 entity_frame_updates.setdefault(entity_id, []).append(frame)
 
-        # 2パス目: 今回計算するのは「前回持ち越したチャンク」(初回だけ例外で
-        # 今回発見ぶんをそのまま使う)。今回新しく見つかったチャンクは、
-        # 次回に持ち越す。
-        was_first_batch = self.is_first_batch
-        self.is_first_batch = False
-        if was_first_batch:
-            chunks_to_emit_now = newly_discovered_chunks
-            self.pending_chunk_queue = []
-        else:
-            chunks_to_emit_now = self.pending_chunk_queue
-            self.pending_chunk_queue = newly_discovered_chunks
+        # 2パス目: 今回計算するのは「前回持ち越したチャンク」。今回新しく
+        # 見つかったチャンクは、次回に持ち越す(最初のバッチだけ即時処理する
+        # 特別扱いはやめた。それをやると、そのチャンクだけ1バッチ遅延の
+        # 恩恵を受けられず、境界やeP編集がらみの不整合が起きうるとわかったため。
+        # 常に1バッチ遅延で統一した方が、見た目が出るのがわずかに遅くなる
+        # 代わりに、確実に正しくなる)。
+        chunks_to_emit_now = self.pending_chunk_queue
+        self.pending_chunk_queue = newly_discovered_chunks
 
         for key in chunks_to_emit_now:
             if key in self.emitted_chunks:
@@ -1110,6 +1163,8 @@ class StreamingMeshProcessor:
 
         result = {
             'new_faces': new_faces,
+            'retracted_positions': [[p[0], p[1], p[2]] for p in retracted_positions],
+            'retracted_faces': [[f[0], f[1], f[2], f[3]] for f in retracted_faces],
             'palette': self.palette_list,  # 毎回パレット全体(小さいので、育っていく分を都度渡す)
             'entity_frame_updates': entity_frame_updates,
             'entity_meta': {eid: {'name': v['name'], 'displayName': v['displayName']} for eid, v in self.entities_out.items()},
@@ -1122,6 +1177,8 @@ class StreamingMeshProcessor:
         }
         if self.done:
             result['bbox'] = [self.minX or 0, self.maxX or 0, self.minY or 0, self.maxY or 0, self.minZ or 0, self.maxZ or 0]
+            if self.decode_error:
+                result['decode_error'] = self.decode_error
         return result
 
 
