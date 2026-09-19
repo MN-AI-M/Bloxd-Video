@@ -1,5 +1,4 @@
 import sys
-sys.path.insert(0, '/home/claude')
 from avro_reader import AvroReader
 import json
 
@@ -133,7 +132,7 @@ def make_decoder(path):
 
     def read_env_entry():
         i = r.read_int()
-        v = r.read_union([lambda: None, r.read_string, r.read_double, wm_reader])
+        v = r.read_union([lambda: None, r.read_string, r.read_double, wm_reader, r.read_boolean])
         return {'i': i, 'v': v}
     Km_reader = lambda: r.read_array(read_env_entry)
 
