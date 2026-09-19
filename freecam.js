@@ -11,6 +11,15 @@
 //     shared.js の FACE_OFFSETS・DIR_FACTOR・worldOriginX,Y,Z・
 //     timeline・curTick を共有して使う。
 //
+// v5: カメラワーク撮影機能を追加(GTA Vのロックスターエディターの
+//     ような体験を狙った)。「🔴 記録」中は、再生を進めながら自由に
+//     飛び回るだけで、その動き(位置・向き)がtickごとに記録される。
+//     記録が終わったら「🎬 プレビュー」でそのカメラワークを自動再生
+//     して確認でき、「💾 書き出す」でcanvasをそのままMediaRecorderで
+//     録画してwebm動画としてダウンロードできる。
+//     UIのオーバーレイ(照準・ステータス表示など)はcanvasの外側に
+//     HTML要素として重ねてあるだけなので、書き出した動画には映り込まない。
+//
 // 操作: クリックでマウスキャプチャ開始、WASDで移動、Spaceで上昇、
 //       Shiftで下降、マウスで視点回転、Escでマウスキャプチャ終了。
 // ============================================================
@@ -31,6 +40,7 @@ let fcLastFrameTime = 0;
 let fcKeys = {};
 let fcYaw = 0, fcPitch = 0;
 let fcPos = [0, 20, 0]; // worldOriginX,Y,Zからの相対座標
+let fcFovDeg = 70;
 
 const FC_MOVE_SPEED = 25; // ブロック/秒
 const FC_MOUSE_SENSITIVITY = 0.0025;
@@ -386,7 +396,7 @@ function renderFreecam() {
   fcGl.vertexAttribPointer(fcARevealTickLoc, 1, fcGl.FLOAT, false, stride, 24);
 
   const aspect = fcCanvas.width / Math.max(1, fcCanvas.height);
-  const proj = fcMat4Perspective(70 * Math.PI / 180, aspect, 0.1, 3000);
+  const proj = fcMat4Perspective(fcFovDeg * Math.PI / 180, aspect, 0.1, 3000);
   const { forward } = fcGetCameraVectors(fcYaw, fcPitch);
   const center = [fcPos[0] + forward[0], fcPos[1] + forward[1], fcPos[2] + forward[2]];
   const view = fcMat4LookAt(fcPos, center, [0, 1, 0]);
@@ -412,21 +422,37 @@ function freecamLoop(now) {
   const dt = fcLastFrameTime ? Math.min(0.1, (now - fcLastFrameTime) / 1000) : 0;
   fcLastFrameTime = now;
 
-  const { forward, right } = fcGetCameraVectors(fcYaw, fcPitch);
-  const d = FC_MOVE_SPEED * dt;
-  const move = (v, s) => { fcPos[0] += v[0]*s; fcPos[1] += v[1]*s; fcPos[2] += v[2]*s; };
-  if (fcKeys['KeyW']) move(forward, d);
-  if (fcKeys['KeyS']) move(forward, -d);
-  if (fcKeys['KeyD']) move(right, d);
-  if (fcKeys['KeyA']) move(right, -d);
-  if (fcKeys['Space']) move([0, 1, 0], d);
-  if (fcKeys['ShiftLeft'] || fcKeys['ShiftRight']) move([0, 1, 0], -d);
+  if (fcPreviewMode) {
+    // カメラは記録したパスに沿って自動で動く(手動操作は無視する)
+    const camState = fcGetInterpolatedCameraState(curTick);
+    if (camState) {
+      fcPos = camState.pos;
+      fcYaw = camState.yaw;
+      fcPitch = camState.pitch;
+    }
+  } else {
+    const { forward, right } = fcGetCameraVectors(fcYaw, fcPitch);
+    const d = FC_MOVE_SPEED * dt;
+    const move = (v, s) => { fcPos[0] += v[0]*s; fcPos[1] += v[1]*s; fcPos[2] += v[2]*s; };
+    if (fcKeys['KeyW']) move(forward, d);
+    if (fcKeys['KeyS']) move(forward, -d);
+    if (fcKeys['KeyD']) move(right, d);
+    if (fcKeys['KeyA']) move(right, -d);
+    if (fcKeys['Space']) move([0, 1, 0], d);
+    if (fcKeys['ShiftLeft'] || fcKeys['ShiftRight']) move([0, 1, 0], -d);
+    fcMaybeRecordFrame();
+  }
 
   renderFreecam();
   fcUpdateStatus();
   if (timeline && timeline.frames.length && timeline.frames[curTick] && typeof updateFrameInfo === 'function') {
     updateFrameInfo(timeline.frames[curTick]);
   }
+
+  if (fcExporting && curTick >= fcExportEndTick) {
+    fcFinishExport();
+  }
+
   fcAnimId = requestAnimationFrame(freecamLoop);
 }
 
@@ -470,5 +496,154 @@ function fcGoToPlayer() {
   if (timeline && timeline.frames.length && timeline.frames[curTick]) {
     const f = timeline.frames[curTick];
     fcPos = [f.position[0] - worldOriginX, f.position[1] - worldOriginY + 2, f.position[2] - worldOriginZ];
+  }
+}
+
+
+// ============================================================
+// カメラワーク撮影(記録・プレビュー・書き出し)
+// ============================================================
+// 「🔴 記録」中に自由カメラを操作すると、tickごとの(位置・向き)を
+// そのまま記録する。GTA Vのロックスターエディターのような、
+// 「操作したものがそのまま撮影される」体験を狙った作り。
+//
+// fcCameraPath: Map<tickIndex(=curTickと同じ、timeline.frames配列の
+// インデックス), {pos:[x,y,z] (worldOrigin基準の相対座標), yaw, pitch}>
+// 記録が飛び飛びになってても、プレビュー・書き出し時は前後の記録済み
+// tickから線形補間して埋める。
+
+let fcRecording = false;
+let fcPreviewMode = false;
+let fcCameraPath = new Map();
+let fcSortedRecordedTicks = [];  // プレビュー/書き出し開始時に1回だけソートして作る
+
+let fcExporting = false;
+let fcExportEndTick = 0;
+let fcMediaRecorder = null;
+let fcRecordedBlobs = [];
+
+function fcMaybeRecordFrame() {
+  if (!fcRecording || !timeline || !timeline.frames.length) return;
+  fcCameraPath.set(curTick, { pos: [fcPos[0], fcPos[1], fcPos[2]], yaw: fcYaw, pitch: fcPitch });
+  if (typeof updateCameraPathIndicator === 'function') updateCameraPathIndicator();
+}
+
+// 指定tickのカメラ状態を返す(記録が無ければnull)。記録済みtickの間は
+// 線形補間、範囲の外は端の値をそのまま使う。
+function fcGetInterpolatedCameraState(tick) {
+  if (fcCameraPath.has(tick)) return fcCameraPath.get(tick);
+  if (fcSortedRecordedTicks.length === 0) return null;
+
+  // 二分探索で「tick以下で一番近い記録」「tick以上で一番近い記録」を探す
+  let lo = 0, hi = fcSortedRecordedTicks.length - 1;
+  if (tick <= fcSortedRecordedTicks[0]) return fcCameraPath.get(fcSortedRecordedTicks[0]);
+  if (tick >= fcSortedRecordedTicks[hi]) return fcCameraPath.get(fcSortedRecordedTicks[hi]);
+  while (lo < hi - 1) {
+    const mid = (lo + hi) >> 1;
+    if (fcSortedRecordedTicks[mid] <= tick) lo = mid; else hi = mid;
+  }
+  const a = fcCameraPath.get(fcSortedRecordedTicks[lo]);
+  const b = fcCameraPath.get(fcSortedRecordedTicks[hi]);
+  const span = fcSortedRecordedTicks[hi] - fcSortedRecordedTicks[lo];
+  const t = span > 0 ? (tick - fcSortedRecordedTicks[lo]) / span : 0;
+  return {
+    pos: [
+      a.pos[0] + (b.pos[0] - a.pos[0]) * t,
+      a.pos[1] + (b.pos[1] - a.pos[1]) * t,
+      a.pos[2] + (b.pos[2] - a.pos[2]) * t,
+    ],
+    yaw: a.yaw + (b.yaw - a.yaw) * t,
+    pitch: a.pitch + (b.pitch - a.pitch) * t,
+  };
+}
+
+function fcToggleRecording() {
+  fcRecording = !fcRecording;
+  if (fcRecording) {
+    fcPreviewMode = false; // 記録中は必ず手動操作
+    if (typeof isPlayingTimeline === 'function' && !isPlayingTimeline()) {
+      startTimelinePlayback(); // 記録開始と同時に再生も始める(自然な操作感のため)
+    }
+  }
+}
+
+function fcTogglePreview() {
+  if (fcCameraPath.size === 0) return;
+  fcPreviewMode = !fcPreviewMode;
+  if (fcPreviewMode) {
+    fcRecording = false;
+    if (document.pointerLockElement === fcCanvas) document.exitPointerLock();
+    fcSortedRecordedTicks = Array.from(fcCameraPath.keys()).sort((a, b) => a - b);
+  }
+}
+
+function fcClearCameraPath() {
+  fcCameraPath = new Map();
+  fcSortedRecordedTicks = [];
+  fcRecording = false;
+  fcPreviewMode = false;
+  if (typeof updateCameraPathIndicator === 'function') updateCameraPathIndicator();
+}
+
+// 記録したカメラパスの通り(最初の記録tick〜最後の記録tick)を、
+// canvasをそのまま録画するMediaRecorderで書き出す。
+// UIのオーバーレイ(照準・ステータス等)はcanvasの外のHTML要素なので、
+// 書き出したファイルには映り込まない。
+function fcStartExport() {
+  if (fcCameraPath.size === 0 || fcExporting) return false;
+  if (typeof MediaRecorder === 'undefined' || !fcCanvas.captureStream) {
+    alert('このブラウザは動画の書き出し(MediaRecorder / captureStream)に対応していないようです。最新のChrome/Firefox/Edgeでお試しください。');
+    return false;
+  }
+
+  fcSortedRecordedTicks = Array.from(fcCameraPath.keys()).sort((a, b) => a - b);
+  const firstTick = fcSortedRecordedTicks[0];
+  fcExportEndTick = fcSortedRecordedTicks[fcSortedRecordedTicks.length - 1];
+
+  fcRecording = false;
+  fcPreviewMode = true;
+  curTick = firstTick;
+  const scrub = document.getElementById('scrub');
+  if (scrub) scrub.value = curTick;
+
+  const stream = fcCanvas.captureStream(30);
+  fcRecordedBlobs = [];
+  const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const mimeType = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
+
+  try {
+    fcMediaRecorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+  } catch (e) {
+    alert('動画の書き出し準備に失敗しました: ' + e.message);
+    fcPreviewMode = false;
+    return false;
+  }
+  fcMediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) fcRecordedBlobs.push(e.data); };
+  fcMediaRecorder.onstop = () => {
+    const blob = new Blob(fcRecordedBlobs, { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bloxd-camerawork-${Date.now()}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    if (typeof onExportFinished === 'function') onExportFinished();
+  };
+
+  fcMediaRecorder.start();
+  fcExporting = true;
+  if (!isPlayingTimeline()) startTimelinePlayback();
+  return true;
+}
+
+function fcFinishExport() {
+  if (!fcExporting) return;
+  fcExporting = false;
+  fcPreviewMode = false;
+  stopTimelinePlayback();
+  if (fcMediaRecorder && fcMediaRecorder.state !== 'inactive') {
+    fcMediaRecorder.stop();
   }
 }

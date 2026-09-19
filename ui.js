@@ -191,6 +191,7 @@ document.getElementById('processBtn').addEventListener('click', async () => {
         document.getElementById('gotoBtn').onclick = () => fcGoToPlayer();
         setupEntitySelector();
         setupTimelineControls();
+        setupFilmingControls();
         await initFreecamOnce();
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
@@ -309,6 +310,111 @@ function setupEntitySelector() {
 // 自由カメラは毎フレーム自分で再描画してる(freecamLoop)ので、ここでは
 // curTick/timelineの状態を更新するだけで良い(明示的な再描画呼び出しは不要)。
 
+// ============================================================
+// 撮影(カメラワークの記録・プレビュー・書き出し)のUI配線
+// ============================================================
+
+function setupFilmingControls() {
+  const recordBtn = document.getElementById('recordBtn');
+  const previewBtn = document.getElementById('previewBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const clearBtn = document.getElementById('clearPathBtn');
+  const fovSlider = document.getElementById('fovSlider');
+  const fovValue = document.getElementById('fovValue');
+
+  recordBtn.onclick = () => {
+    fcToggleRecording();
+    recordBtn.innerText = fcRecording ? '⏹ 記録停止' : '🔴 記録開始';
+    recordBtn.classList.toggle('recording', fcRecording);
+    previewBtn.classList.remove('active');
+  };
+
+  previewBtn.onclick = () => {
+    fcTogglePreview();
+    previewBtn.innerText = fcPreviewMode ? '👋 手動操作に戻る' : '🎬 プレビュー';
+    previewBtn.classList.toggle('active', fcPreviewMode);
+    recordBtn.innerText = '🔴 記録開始';
+    recordBtn.classList.remove('recording');
+  };
+
+  exportBtn.onclick = () => {
+    const started = fcStartExport();
+    if (started) {
+      document.getElementById('exportStatus').innerText = '⏺ 書き出し中...(終わるまでこの画面を離れないでください)';
+      recordBtn.disabled = true; previewBtn.disabled = true; exportBtn.disabled = true; clearBtn.disabled = true;
+      recordBtn.innerText = '🔴 記録開始'; recordBtn.classList.remove('recording');
+      previewBtn.innerText = '🎬 プレビュー'; previewBtn.classList.add('active');
+    }
+  };
+
+  clearBtn.onclick = () => {
+    if (fcCameraPath.size === 0) return;
+    if (confirm('記録したカメラワークを消しますか?(元に戻せません)')) {
+      fcClearCameraPath();
+      recordBtn.innerText = '🔴 記録開始'; recordBtn.classList.remove('recording');
+      previewBtn.innerText = '🎬 プレビュー'; previewBtn.classList.remove('active');
+    }
+  };
+
+  fovSlider.oninput = () => {
+    fcFovDeg = parseInt(fovSlider.value);
+    fovValue.innerText = fcFovDeg + '°';
+  };
+
+  updateCameraPathIndicator();
+}
+
+// fcCameraPathの内容が変わるたび(freecam.jsから)呼ばれ、タイムライン上に
+// 「撮影済みの範囲」を色付きで表示する。ボタンの有効/無効もここで揃える。
+function updateCameraPathIndicator() {
+  const overlay = document.getElementById('pathOverlay');
+  const previewBtn = document.getElementById('previewBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const clearBtn = document.getElementById('clearPathBtn');
+  if (!overlay || !timeline || !timeline.frames.length) return;
+
+  const hasPath = fcCameraPath.size > 0;
+  if (previewBtn) previewBtn.disabled = !hasPath;
+  if (exportBtn) exportBtn.disabled = !hasPath;
+  if (clearBtn) clearBtn.disabled = !hasPath;
+
+  const total = Math.max(1, timeline.frames.length - 1);
+  const ticks = Array.from(fcCameraPath.keys()).sort((a, b) => a - b);
+  const segments = [];
+  let segStart = null, segEnd = null;
+  for (const t of ticks) {
+    if (segStart === null) { segStart = t; segEnd = t; }
+    else if (t <= segEnd + 3) { segEnd = t; } // 小さい隙間は同じ区間として表示する
+    else { segments.push([segStart, segEnd]); segStart = t; segEnd = t; }
+  }
+  if (segStart !== null) segments.push([segStart, segEnd]);
+
+  overlay.innerHTML = '';
+  for (const [s, e] of segments) {
+    const div = document.createElement('div');
+    div.style.position = 'absolute';
+    div.style.left = (100 * s / total) + '%';
+    div.style.width = Math.max(0.4, 100 * (e - s) / total) + '%';
+    div.style.top = '0'; div.style.bottom = '0';
+    div.style.background = '#e74c3c';
+    div.style.borderRadius = '2px';
+    overlay.appendChild(div);
+  }
+}
+
+// freecam.jsのMediaRecorder.onstopから呼ばれる(書き出し完了・ダウンロード開始後)
+function onExportFinished() {
+  document.getElementById('exportStatus').innerText = '✅ 書き出し完了(ダウンロードを確認してください)';
+  setTimeout(() => { document.getElementById('exportStatus').innerText = ''; }, 5000);
+  document.getElementById('recordBtn').disabled = false;
+  document.getElementById('previewBtn').disabled = false;
+  document.getElementById('exportBtn').disabled = false;
+  document.getElementById('clearPathBtn').disabled = false;
+  document.getElementById('previewBtn').innerText = '🎬 プレビュー';
+  document.getElementById('previewBtn').classList.remove('active');
+}
+
+
 function setupTimelineControls() {
   const scrub = document.getElementById('scrub');
   scrub.max = timeline.frames.length - 1;
@@ -317,11 +423,27 @@ function setupTimelineControls() {
   });
 
   document.getElementById('playBtn').addEventListener('click', () => {
-    playing = !playing;
-    document.getElementById('playBtn').innerText = playing ? '⏸ 一時停止' : '▶ 再生';
-    if (playing) { lastFrameTime = performance.now(); playTick(); }
-    else if (animId) cancelAnimationFrame(animId);
+    if (playing) stopTimelinePlayback(); else startTimelinePlayback();
   });
+}
+
+// 他の機能(カメラ記録・書き出しなど)からも呼べるよう、再生の開始/停止を
+// 独立した関数にしてある。
+function isPlayingTimeline() { return playing; }
+
+function startTimelinePlayback() {
+  if (playing) return;
+  playing = true;
+  document.getElementById('playBtn').innerText = '⏸ 一時停止';
+  lastFrameTime = performance.now();
+  playTick();
+}
+
+function stopTimelinePlayback() {
+  if (!playing) return;
+  playing = false;
+  document.getElementById('playBtn').innerText = '▶ 再生';
+  if (animId) cancelAnimationFrame(animId);
 }
 
 function playTick() {
@@ -340,8 +462,7 @@ function playTick() {
     if (curTick >= maxAvailable) {
       if (streamingDone) {
         // 本当にここで終わり
-        playing = false;
-        document.getElementById('playBtn').innerText = '▶ 再生';
+        stopTimelinePlayback();
         return;
       }
       // まだ裏で解析が続いてるので、今ある最後のフレームで一旦待つ
