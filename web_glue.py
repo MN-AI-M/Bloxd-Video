@@ -25,6 +25,17 @@ v7: 自由カメラを常にフル解像度(LOD無し)にすることにした�
     変わらないため、rebuild_mesh_nearの呼び出しがそもそも不要になった
     (アイソメ表示側は引き続きLODありのまま、影響しない)。
 
+v8: アイソメ表示側(メインの読み込みフロー)も、全部読み終わるまで
+    何も見せないのをやめて、ストリーミング処理(StreamingMeshProcessor)に
+    切り替えた。少しずつtickを処理しては、その時点で新しく分かった地形の面・
+    タイムラインのフレームだけを返す(YouTubeの動画処理のように、できた分
+    から見せる方式)。これに伴い、LODも自由カメラ側と同じく無効化した
+    (LODの基準=プレイヤーの通った場所は全体を見ないと決まらず、
+    ストリーミングと相性が悪いため)。
+    start_streaming_replay()で開始し、process_next_streaming_batch()を
+    doneになるまで繰り返し呼ぶ。process_replay_bytes()(一括処理版)は
+    今は使ってないが、参考用に残してある。
+
 今まで作った build_2d_map.py / build_all_timelines.py の処理を、
 ファイルへの書き込み無し(全部メモリ上)で呼べるようにまとめてある。
 """
@@ -32,20 +43,46 @@ import io
 import json
 
 from bloxdreplay_decode_full import make_decoder
-from build_2d_map import build_voxel_mesh_from_decoded, build_voxel_mesh_near_camera
+from build_2d_map import build_voxel_mesh_from_decoded, build_voxel_mesh_near_camera, StreamingMeshProcessor
 from build_all_timelines import build_all_timelines_from_decoded
 
 BLOCK_ID_TO_ROOT_PATH = "block_id_to_root.csv"
 ASSET_MASTER_PATH = "asset_master.csv"
 
-_cached_res = None    # process_replay_bytes()で一度デコードしたresを覚えておく(再デコード回避用)
+_cached_res = None    # 一度デコードしたresを覚えておく(再デコード回避用。rebuild_mesh_near/build_full_res_meshが使う)
 _chunk_cache = {}     # チャンクのデコード結果・自由カメラLODの計算結果をセッション全体で使い回すキャッシュ
 _fullres_chunk_cache = {}  # 自由カメラのフル解像度メッシュ専用のキャッシュ(_chunk_cacheとは別物)
+_streaming_processor = None  # StreamingMeshProcessorのインスタンス(start_streaming_replay()で作る)
+
+
+def start_streaming_replay(data: bytes) -> None:
+    """.bloxdreplayの中身(バイト列)を受け取って、ストリーミング処理を
+    開始する(まだ何もtickは処理しない)。この後、process_next_streaming_
+    batch()をdoneになるまで繰り返し呼ぶ。"""
+    global _cached_res, _chunk_cache, _fullres_chunk_cache, _streaming_processor
+    res = make_decoder_from_bytes(data)
+    _cached_res = res  # rebuild_mesh_near()/build_full_res_mesh()用に覚えておく
+    _chunk_cache = {}  # 新しいファイルを読み込んだので、キャッシュは作り直す
+    _fullres_chunk_cache = {}
+    _streaming_processor = StreamingMeshProcessor(res, BLOCK_ID_TO_ROOT_PATH, ASSET_MASTER_PATH)
+
+
+def process_next_streaming_batch(batch_ticks: int = 500) -> str:
+    """ストリーミング処理の続きをbatch_ticksぶんだけ進めて、今回新しく
+    分かった地形の面・タイムラインのフレームなどをJSON文字列で返す。
+    戻り値の中の'done'がtrueになるまで繰り返し呼ぶ想定。"""
+    if _streaming_processor is None:
+        raise RuntimeError("start_streaming_replayが先に呼ばれてないため、process_next_streaming_batchは使えません")
+    result = _streaming_processor.process_batch(batch_ticks=batch_ticks)
+    return json.dumps(result, ensure_ascii=False)
 
 
 def process_replay_bytes(data: bytes) -> str:
     """.bloxdreplayの中身(バイト列)を受け取って、
-    { mesh: {...}, timelines: {...} } のJSON文字列を返す。"""
+    { mesh: {...}, timelines: {...} } のJSON文字列を返す。
+
+    ※ 一括処理版。現在のメインの読み込みフローはstart_streaming_replay()に
+    切り替えたので、こちらは今は使われていないが、参考用に残してある。"""
     global _cached_res, _chunk_cache, _fullres_chunk_cache
     res = make_decoder_from_bytes(data)
     _cached_res = res  # rebuild_mesh_near()用に覚えておく
@@ -81,15 +118,7 @@ def rebuild_mesh_near(x: float, z: float) -> str:
 
 
 def build_full_res_mesh() -> str:
-    """自由カメラモード用。LODを完全に無効化した(near_radius=inf)、
-    ワールド全体をフル解像度で含むメッシュを1回だけ作る。
-    カメラがどこに動いても近く/遠くの分類自体が変わらないので、
-    これ以降カメラが動くたびの再計算は一切不要になる。
 
-    process_replay_bytes()と同じ_cached_resを使うが、チャンクの再デコードを
-    避けるため専用のキャッシュ(_fullres_chunk_cache)を使う
-    (アイソメ表示用の_chunk_cacheと混ざらないように分けてある。
-    こちらは常時near_radius=infで呼ぶので、混ざると数値が食い違う)。"""
     global _fullres_chunk_cache
     if _cached_res is None:
         raise RuntimeError("process_replay_bytesが先に呼ばれてないため、build_full_res_meshは使えません")
