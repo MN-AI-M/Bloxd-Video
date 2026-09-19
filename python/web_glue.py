@@ -118,15 +118,7 @@ def rebuild_mesh_near(x: float, z: float) -> str:
 
 
 def build_full_res_mesh() -> str:
-    """自由カメラモード用。LODを完全に無効化した(near_radius=inf)、
-    ワールド全体をフル解像度で含むメッシュを1回だけ作る。
-    カメラがどこに動いても近く/遠くの分類自体が変わらないので、
-    これ以降カメラが動くたびの再計算は一切不要になる。
 
-    process_replay_bytes()と同じ_cached_resを使うが、チャンクの再デコードを
-    避けるため専用のキャッシュ(_fullres_chunk_cache)を使う
-    (アイソメ表示用の_chunk_cacheと混ざらないように分けてある。
-    こちらは常時near_radius=infで呼ぶので、混ざると数値が食い違う)。"""
     global _fullres_chunk_cache
     if _cached_res is None:
         raise RuntimeError("process_replay_bytesが先に呼ばれてないため、build_full_res_meshは使えません")
