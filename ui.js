@@ -10,11 +10,12 @@
 // ============================================================
 
 let allTimelines = null;
-let currentMesh = null;
 let textureColors = new Map();
 let playing = false, lastFrameTime = 0, animId = null;
 let textureUrls = null;           // ファイル名(拡張子なし) -> Blob URL
 let textureZipReadyPromise = null;
+let textureColorsReadyPromise = null;
+let streamingDone = false;        // ストリーミング処理が最後まで終わったか
 
 const PYTHON_FILES = [
   'avro_reader.py',
@@ -27,10 +28,15 @@ const CSV_FILES = ['block_id_to_root.csv', 'asset_master.csv'];
 
 
 // ============================================================
-// textures.zip の読み込み・展開
+// textures.zip の読み込み・展開・色抽出
 // 個々のpngをリポジトリに大量コミットする代わりに、1つのzipにまとめて
 // 置いておき、ブラウザ内(JSZip)で展開してBlob URLにする。
 // renderer.js からも window.getTextureUrl(name) で同じものを参照できる。
+//
+// v2: 地形の読み込みをストリーミング化したのに合わせて、テクスチャの
+//     色も「実際に使われてる分だけ後から解決する」のではなく、
+//     zipの中身を最初に全部サンプリングしておく方式にした
+//     (どの見た目が新しく出てきても、すぐ色を引けるようにするため)。
 // ============================================================
 
 function ensureTexturesLoading() {
@@ -61,8 +67,51 @@ async function loadTextureZip() {
 // renderer.js(3D一人称視点など)から同じテクスチャを参照するための入口
 window.getTextureUrl = (name) => textureUrls ? textureUrls.get(name) : undefined;
 
-// ページを開いたらすぐ裏でzipの展開も始めておく(Pyodideと並行)
-ensureTexturesLoading().catch(() => {});
+function ensureTextureColorsReady() {
+  if (!textureColorsReadyPromise) {
+    textureColorsReadyPromise = preloadAllTextureColors();
+  }
+  return textureColorsReadyPromise;
+}
+
+async function preloadAllTextureColors() {
+  await ensureTexturesLoading();
+
+  const sampleCanvas = document.createElement('canvas');
+  sampleCanvas.width = 1; sampleCanvas.height = 1;
+  const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
+
+  const promises = [];
+  for (const [texName, blobUrl] of textureUrls) {
+    promises.push(new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          sampleCtx.drawImage(img, 0, 0, 1, 1);
+          const [r, g, b] = sampleCtx.getImageData(0, 0, 1, 1).data;
+          textureColors.set(texName, `rgb(${r},${g},${b})`);
+        } catch (e) {
+          textureColors.set(texName, '#888');
+        }
+        resolve();
+      };
+      img.onerror = () => { textureColors.set(texName, '#a33'); resolve(); };
+      img.src = blobUrl;
+    }));
+  }
+  await Promise.all(promises);
+}
+
+// パレット配列(Python由来)を、解決済みの色文字列の配列に変換する。
+// zipに無かった/まだ解決できてないテクスチャはフォールバック色になる。
+function resolvePaletteColors(palette) {
+  return palette.map(p =>
+    textureColors.get(p.texture) || ((p.asset_type === '3d_model') ? '#7a4a2a' : '#444')
+  );
+}
+
+// ページを開いたらすぐ裏でzipの展開・色抽出も始めておく(Pyodideと並行)
+ensureTextureColorsReady().catch(() => {});
 
 
 // ============================================================
@@ -111,6 +160,12 @@ function startPyWorker() {
     } else if (msg.type === 'result') {
       const p = pendingWorkerRequests.get(msg.id);
       if (p) { pendingWorkerRequests.delete(msg.id); p.resolve(msg.result); }
+    } else if (msg.type === 'partial') {
+      const p = pendingWorkerRequests.get(msg.id);
+      if (p) {
+        if (p.onPartial) p.onPartial(msg.result);
+        if (msg.result.done) { pendingWorkerRequests.delete(msg.id); p.resolve(msg.result); }
+      }
     } else if (msg.type === 'error') {
       const p = pendingWorkerRequests.get(msg.id);
       if (p) { pendingWorkerRequests.delete(msg.id); p.reject(new Error(msg.message)); }
@@ -135,6 +190,17 @@ function callPyWorker(type, payload, transferList) {
   });
 }
 
+// process_replay_streamingのような、1回のリクエストに対して複数回
+// レスポンス('partial')が返ってくるタイプの呼び出し用。届くたびに
+// onPartial(result)が呼ばれ、result.doneがtrueになった回でPromiseも解決する。
+function streamPyWorker(type, payload, transferList, onPartial) {
+  return new Promise((resolve, reject) => {
+    const id = nextWorkerRequestId++;
+    pendingWorkerRequests.set(id, { resolve, reject, onPartial });
+    pyWorker.postMessage({ id, type, payload }, transferList || []);
+  });
+}
+
 // ページを開いたらすぐ裏でPyodideの準備を始めておく(体感速度のため)
 ensurePyodideLoading();
 
@@ -151,26 +217,55 @@ document.getElementById('processBtn').addEventListener('click', async () => {
   const file = fileInput.files[0];
   document.getElementById('processBtn').disabled = true;
 
-  try {
-    statusEl.innerText = 'Python環境の準備を待っています...';
-    await ensurePyodideLoading();
+  allTimelines = null;
+  streamingDone = false;
+  startRendererStream();
 
-    statusEl.innerText = 'リプレイを解析中...(ファイルが大きいと時間がかかります)';
+  let editorShown = false;
+
+  try {
+    statusEl.innerText = '準備しています...';
+    await Promise.all([ensurePyodideLoading(), ensureTextureColorsReady()]);
+
+    statusEl.innerText = 'リプレイを解析中...';
     const arrayBuffer = await file.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
 
-    const data = await callPyWorker('process_replay', { bytes }, [bytes.buffer]);
+    await streamPyWorker('process_replay_streaming', { bytes }, [bytes.buffer], (partial) => {
+      handleStreamingPartial(partial);
 
-    statusEl.innerText = '描画を準備中...';
+      if (!editorShown && allTimelines && Object.keys(allTimelines.entities).length > 0) {
+        // 最初にプレイヤーの情報が揃った時点で、すぐ再生できる画面に切り替える。
+        // 続きの解析はこの後もバックグラウンドで続く。
+        editorShown = true;
+        document.getElementById('uploadScreen').classList.add('hidden');
+        document.getElementById('editor').classList.add('active');
+        initCanvases();
+        setupTopButtons();
+        setupPanZoom();
+        setupHover();
+        setupTimelineControls();
+        setupEntitySelector();
+        fitToView();
+        renderPlayerMarker();
+      } else if (editorShown) {
+        // 継ぎ足された分をそのまま反映する
+        document.getElementById('scrub').max = timeline.frames.length - 1;
+        drawIso();
+        renderPlayerMarker();
+      }
 
-    currentMesh = data.mesh;
-    allTimelines = data.timelines;
-    setRendererMesh(currentMesh);
-    setupEntitySelector();
+      if (partial.done) {
+        streamingDone = true;
+        if (editorShown) fitToView(); // 全部揃ったので、最後にもう一度全体表示に合わせる
+      }
+    });
 
-    document.getElementById('uploadScreen').classList.add('hidden');
-    document.getElementById('editor').classList.add('active');
-    await loadTexturesAndInit();
+    if (!editorShown) {
+      // 最後まで処理してもエンティティが1体も見つからなかった場合
+      statusEl.innerText = 'プレイヤーの情報が見つかりませんでした。別のファイルでお試しください。';
+      document.getElementById('processBtn').disabled = false;
+    }
   } catch (e) {
     statusEl.innerText = 'エラー: ' + e.message;
     document.getElementById('processBtn').disabled = false;
@@ -179,91 +274,43 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 
 
 // ============================================================
-// テクスチャの読み込み(色の抽出だけして、描画は塗りつぶしで軽量に行う)
-// このサイトに同梱した textures.zip からそのまま読む。
+// ストリーミングで届いた1バッチぶんを反映する
 // ============================================================
 
-async function loadTexturesAndInit() {
-  const mesh = currentMesh;
-  const faceCount = mesh.faces.length;
-  setStatusText(`面数: ${faceCount.toLocaleString()} (読み込み中...)`);
-  if (faceCount === 0) return;
-
-  setStatusText(`面数: ${faceCount.toLocaleString()} / textures.zip を展開中...`);
-  try {
-    await ensureTexturesLoading();
-  } catch (e) {
-    setStatusText(`⚠️ textures.zip の読み込みに失敗しました: ${e.message}(このサイトの./textures.zipを確認してください)`);
-    textureUrls = new Map(); // 空のまま続行 → 全テクスチャがフォールバック色になる
+function handleStreamingPartial(partial) {
+  if (!allTimelines) {
+    allTimelines = {
+      entities: {},
+      ticksPerSecond: partial.ticks_per_second || 30,
+      localPlayerEntityId: partial.local_player_entity_id,
+    };
   }
 
-  setStatusText(`面数: ${faceCount.toLocaleString()} / テクスチャ読み込み中...`);
-
-  const palette = mesh.palette;
-  const neededTextures = new Set();
-  for (const p of palette) if (p.texture) neededTextures.add(p.texture);
-
-  const sampleCanvas = document.createElement('canvas');
-  sampleCanvas.width = 1; sampleCanvas.height = 1;
-  const sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
-
-  let loaded = 0, failedCount = 0;
-  const totalTextures = neededTextures.size;
-  const promises = [];
-  for (const texName of neededTextures) {
-    const blobUrl = textureUrls.get(texName);
-    const p = new Promise((resolve) => {
-      if (!blobUrl) {
-        // zip内にこのテクスチャが無かった(名前の不一致・未同梱など)
-        textureColors.set(texName, '#a33');
-        loaded++; failedCount++;
-        resolve();
-        return;
-      }
-      const img = new Image();
-      img.onload = () => {
-        try {
-          sampleCtx.drawImage(img, 0, 0, 1, 1);
-          const [r, g, b] = sampleCtx.getImageData(0, 0, 1, 1).data;
-          textureColors.set(texName, `rgb(${r},${g},${b})`);
-        } catch (e) {
-          textureColors.set(texName, '#888');
-        }
-        loaded++;
-        setStatusText(`面数: ${faceCount.toLocaleString()} / テクスチャ ${loaded}/${totalTextures}`);
-        resolve();
-      };
-      img.onerror = () => {
-        textureColors.set(texName, '#a33');
-        loaded++; failedCount++;
-        resolve();
-      };
-      img.src = blobUrl;
-    });
-    promises.push(p);
+  for (const [eid, frames] of Object.entries(partial.entity_frame_updates)) {
+    if (!allTimelines.entities[eid]) {
+      allTimelines.entities[eid] = { name: null, displayName: null, frames: [] };
+    }
+    allTimelines.entities[eid].frames.push(...frames);
   }
-  await Promise.all(promises);
+  for (const [eid, meta] of Object.entries(partial.entity_meta)) {
+    if (allTimelines.entities[eid]) {
+      allTimelines.entities[eid].name = meta.name;
+      allTimelines.entities[eid].displayName = meta.displayName;
+    }
+  }
 
-  // パレットの各見た目に、実際のRGB色(テクスチャの平均色)を割り当てる
-  const paletteColors = palette.map(p =>
-    textureColors.get(p.texture) || ((p.asset_type === '3d_model') ? '#7a4a2a' : '#444')
-  );
+  const resolvedColors = resolvePaletteColors(partial.palette);
+  appendRendererFaces(partial.new_faces, partial.palette, resolvedColors);
 
-  if (failedCount > totalTextures * 0.3) {
-    setStatusText(`⚠️ テクスチャの${failedCount}/${totalTextures}件が読み込めませんでした(textures.zipの中身を確認してください)`);
+  const pct = partial.total_ticks ? Math.round(100 * partial.processed_tick / partial.total_ticks) : 100;
+  const faceCountText = `面数: ${(meshFaces ? meshFaces.length : 0).toLocaleString()}`;
+  if (partial.truncated) {
+    setStatusText(`⚠️ データ量が多すぎたため、途中で打ち切りました(${pct}%まで処理・${faceCountText}）`);
+  } else if (partial.done) {
+    setStatusText(`${faceCountText} / 完了`);
   } else {
-    setStatusText(`面数: ${faceCount.toLocaleString()} / 完了`);
+    setStatusText(`${faceCountText} / 解析中...(${pct}%、裏で続けています)`);
   }
-
-  setRendererPaletteColors(paletteColors);
-  initCanvases();
-  setupTopButtons();
-  drawIso();
-  setupPanZoom();
-  setupHover();
-  setupTimelineControls();
-  fitToView();
-  renderPlayerMarker();
 }
 
 
@@ -348,15 +395,23 @@ function playTick() {
   const elapsed = (now - lastFrameTime) / 1000;
   const ticksToAdvance = Math.floor(elapsed * tps);
   if (ticksToAdvance > 0) {
-    curTick = Math.min(curTick + ticksToAdvance, timeline.frames.length - 1);
+    const maxAvailable = timeline.frames.length - 1;
+    const next = Math.min(curTick + ticksToAdvance, maxAvailable);
+    curTick = next;
     lastFrameTime = now;
     document.getElementById('scrub').value = curTick;
+    document.getElementById('scrub').max = maxAvailable;
     drawIso();          // このtickまでに置かれたブロックだけ表示されるよう再描画
     renderPlayerMarker();
-    if (curTick >= timeline.frames.length - 1) {
-      playing = false;
-      document.getElementById('playBtn').innerText = '▶ 再生';
-      return;
+    if (curTick >= maxAvailable) {
+      if (streamingDone) {
+        // 本当にここで終わり
+        playing = false;
+        document.getElementById('playBtn').innerText = '▶ 再生';
+        return;
+      }
+      // まだ裏で解析が続いてるので、今ある最後のフレームで一旦待つ
+      // (再生自体は止めず、続きが届き次第すぐ進む)
     }
   }
   animId = requestAnimationFrame(playTick);

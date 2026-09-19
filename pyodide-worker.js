@@ -58,8 +58,13 @@ self.onmessage = async (event) => {
   const { id, type, payload } = event.data;
   try {
     await pyodideReadyPromise;
-    let resultJson;
 
+    if (type === 'process_replay_streaming') {
+      await handleStreamingReplay(id, payload);
+      return;
+    }
+
+    let resultJson;
     if (type === 'process_replay') {
       pyodide.globals.set('_input_bytes', payload.bytes);
       resultJson = pyodide.runPython(
@@ -80,3 +85,40 @@ self.onmessage = async (event) => {
     postMessage({ id, type: 'error', message: e.message });
   }
 };
+
+// ============================================================
+// ストリーミング処理(「できたところから見せる」方式)
+// ============================================================
+// 最初は小さいバッチ(体感すぐ再生できるように)、その後は大きいバッチ
+// (往復の回数を減らすため)で少しずつ処理し、そのたびにpostMessageで
+// 「今回新しく分かった分」だけをメインスレッドに送る。
+// バッチとバッチの間に一瞬だけ制御を返す(setTimeout 0)ことで、
+// 処理の合間に他のリクエスト(自由カメラ側の呼び出しなど)も
+// 割り込んで処理できるようにしてある。
+const STREAMING_FIRST_BATCH_TICKS = 100;   // 最初のバッチ(だいたい数秒ぶん)
+const STREAMING_LATER_BATCH_TICKS = 1000;  // 2回目以降のバッチ
+
+async function handleStreamingReplay(id, payload) {
+  pyodide.globals.set('_input_bytes', payload.bytes);
+  pyodide.runPython(
+    'import web_glue\n' +
+    'web_glue.start_streaming_replay(bytes(_input_bytes))'
+  );
+
+  let batchTicks = STREAMING_FIRST_BATCH_TICKS;
+  while (true) {
+    pyodide.globals.set('_batch_ticks', batchTicks);
+    const resultJson = pyodide.runPython(
+      'import web_glue\n' +
+      'web_glue.process_next_streaming_batch(_batch_ticks)'
+    );
+    const result = JSON.parse(resultJson);
+    postMessage({ id, type: 'partial', result });
+
+    if (result.done) break;
+    batchTicks = STREAMING_LATER_BATCH_TICKS;
+
+    // 他のリクエストが割り込めるよう、一瞬だけ制御を返す
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}

@@ -136,6 +136,92 @@ function setRendererTimeline(newTimeline) {
   curTick = 0;
 }
 
+
+// ============================================================
+// ストリーミング用(「できたところから見せる」方式)
+// ============================================================
+// 全部読み終わるのを待たず、少しずつ届く面を継ぎ足していく。
+//
+// 頂点座標の原点(isoMinX,Y,Z)は、最初に届いた面から1回だけ決めて、
+// それ以降は絶対に変えない(既にGPUへアップロード済みの頂点は、その
+// 原点を基準にした相対座標で焼き込まれてるので、後から原点を動かすと
+// 全部ズレてしまう)。isoMaxX,Y,Z(全体の範囲。fitToViewでしか使わない)や
+// isoOriginX・depthNorm(どちらもuniformとして毎フレーム渡すだけで、
+// 頂点データには焼き込まれてない)は、いつでも安全に更新できる。
+let streamVerts = [];
+let streamOriginSet = false;
+
+function startRendererStream() {
+  meshFaces = [];
+  meshPalette = [];
+  paletteColorsRaw = [];
+  streamVerts = [];
+  streamOriginSet = false;
+  isoMinX = isoMinY = isoMinZ = 0;
+  isoMaxX = isoMaxY = isoMaxZ = 0;
+  isoOriginX = 20;
+  depthNorm = 1 / 6000; // 控えめな初期値。appendのたびに範囲が伸びるので随時更新する
+  vertexCount = 0;
+  hoverIndex = new Map();
+}
+
+// newFaces: 今回新しく分かった面([[x,y,z,dirCode,paletteIdx,scale,revealTick],...])
+// newPalette: 現時点での完全なパレット配列(毎回全体を受け取る想定)
+// paletteColors: newPaletteと同じ並びの、解決済みの色文字列配列("rgb(...)"等)
+function appendRendererFaces(newFaces, newPalette, paletteColors) {
+  meshPalette = newPalette;
+  paletteColorsRaw = paletteColors;
+  if (!newFaces.length) return;
+
+  if (!streamOriginSet) {
+    isoMinX = newFaces[0][0]; isoMinY = newFaces[0][1]; isoMinZ = newFaces[0][2];
+    isoMaxX = isoMinX; isoMaxY = isoMinY; isoMaxZ = isoMinZ;
+    streamOriginSet = true;
+  }
+
+  const order = [0, 1, 2, 0, 2, 3];
+  for (const f of newFaces) {
+    meshFaces.push(f);
+    const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4], scale = f[5] || 1, revealTick = f[6] || 0;
+
+    // isoMaxX,Y,Zはfit表示用に伸ばしていく(isoMinX,Y,Zは絶対に動かさない)
+    if (wx > isoMaxX) isoMaxX = wx;
+    if (wy > isoMaxY) isoMaxY = wy;
+    if (wz > isoMaxZ) isoMaxZ = wz;
+
+    const bx = wx - isoMinX, by = wy - isoMinY, bz = wz - isoMinZ;
+    const yRange = Math.max(1, isoMaxY - isoMinY);
+    const brightness = (0.75 + 0.35 * (by / yRange)) * DIR_FACTOR[dirCode];
+    const rgb = shadeColorRGB(paletteColorsRaw[pIdx] || '#888', brightness);
+    const [r, g, b] = rgb;
+
+    const offsets = FACE_OFFSETS[dirCode];
+    for (const oi of order) {
+      const [ox, oy, oz] = offsets[oi];
+      streamVerts.push(bx + ox * scale, by + oy, bz + oz * scale, r, g, b, revealTick);
+    }
+
+    if (dirCode === 2) { // +y(上面)だけホバー表示用インデックスに登録
+      const key = (wx - isoMinX) + '_' + (wz - isoMinZ);
+      const existing = hoverIndex.get(key);
+      if (!existing || wy > existing.y) hoverIndex.set(key, { x: wx, y: wy, z: wz, paletteIdx: pIdx });
+    }
+  }
+
+  // 奥行きの正規化係数を、今の範囲に合わせて更新する(uniformなので
+  // 頂点データには影響しない。安全にいつでも更新できる)
+  const maxRawDepth = Math.max(1, (isoMaxX - isoMinX) + (isoMaxZ - isoMinZ) + (isoMaxY - isoMinY) * DEPTH_Y_FACTOR);
+  depthNorm = 1 / maxRawDepth;
+  const hSpan = isoMaxZ - isoMinZ + 1;
+  isoOriginX = hSpan * ISO_W / 2 + 20;
+
+  if (gl) {
+    vertexCount = streamVerts.length / 7;
+    gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(streamVerts), gl.DYNAMIC_DRAW);
+  }
+}
+
 function buildHoverIndex() {
   hoverIndex = new Map();
   if (!meshFaces) return;
