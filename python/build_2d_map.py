@@ -944,6 +944,21 @@ class StreamingMeshProcessor:
         # (=境界に薄い余分な面が残る問題を、確率的な軽減ではなく確実に直す)。
         self.provisional_faces = {}
 
+        # res['initialChunks']: 録画が始まった時点で、既にロード済みだった
+        # チャンク(プレイヤーの周りの地形など)。これはtick中の
+        # structuralEvents(chunkAdded)には一切出てこない、別物の一覧
+        # なので、ここで明示的に読み込んでおかないと、録画開始前からの
+        # 地形が丸ごと表示されないことになる(実際に発生していたバグ)。
+        # tick 0の時点で既にあった扱いにして、通常のchunkAddedと同じ
+        # 「1バッチ遅延」の列に乗せておく(境界の整合性チェックも同じ
+        # 仕組みで効くようにするため)。
+        for c in res.get('initialChunks', []):
+            cx, cy, cz = c['chunkPos']
+            key = (cx, cy, cz)
+            self.chunk_events[key] = {'rle': c['rle']}
+            self.chunk_tick[key] = 0
+            self.pending_chunk_queue.append(key)
+
         # ある位置(x,y,z)について、チャンク処理(_emit_chunk_faces)で
         # 一度でも面を出したことがあれば記録しておく。後からその位置が
         # eP編集されてると分かった時点で「撤回対象」として報告し、
@@ -1151,15 +1166,21 @@ class StreamingMeshProcessor:
 
         if self.done and not self.truncated:
             # 最後に、持ち越しキューに残ってる分(最後のバッチで見つかった分)を
-            # まとめて出す
+            # まとめて出す(ここも上限チェックが漏れてたので追加した。
+            # 漏れてると、最後のキューが大量にあった時に上限を超えて
+            # 際限なく増えてしまう可能性があった)
             for key in self.pending_chunk_queue:
                 if key not in self.emitted_chunks:
                     self.emitted_chunks.add(key)
                     faces = self._emit_chunk_faces(key)
                     new_faces.extend(faces)
                     self._total_faces += len(faces)
+                    if self._total_faces >= MAX_MESH_FACES:
+                        self.truncated = True
+                        break
             self.pending_chunk_queue = []
-            new_faces.extend(self._finalize_edits())
+            if not self.truncated:
+                new_faces.extend(self._finalize_edits())
 
         result = {
             'new_faces': new_faces,
