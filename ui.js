@@ -191,12 +191,13 @@ document.getElementById('processBtn').addEventListener('click', async () => {
         document.getElementById('gotoBtn').onclick = () => fcGoToPlayer();
         setupEntitySelector();
         setupTimelineControls();
-        setupFilmingControls();
+        initTimelineUI();
+        setupFovControl();
         await initFreecamOnce();
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
         // 再描画してるので、ここで明示的な再描画は不要)
-        document.getElementById('scrub').max = timeline.frames.length - 1;
+        renderTimeline();
       }
 
       if (partial.done) {
@@ -297,8 +298,8 @@ function setupEntitySelector() {
   sel.value = allTimelines.localPlayerEntityId;
   sel.addEventListener('change', () => {
     setRendererTimeline(allTimelines.entities[sel.value]);
-    document.getElementById('scrub').max = timeline.frames.length - 1;
-    document.getElementById('scrub').value = 0;
+    curTick = 0;
+    renderTimeline();
   });
   setRendererTimeline(allTimelines.entities[sel.value]);
 }
@@ -311,117 +312,69 @@ function setupEntitySelector() {
 // curTick/timelineの状態を更新するだけで良い(明示的な再描画呼び出しは不要)。
 
 // ============================================================
-// 撮影(カメラワークの記録・プレビュー・書き出し)のUI配線
+// 撮影(画角・全体プレビュー・書き出し)のUI配線
 // ============================================================
+// ブロックの記録・削除などは timeline.js の編集パネルが担当する。
+// ここでは「タイムライン全体」に対する操作(プレビュー・書き出し)と
+// 画角スライダーだけを扱う。
 
-function setupFilmingControls() {
-  const recordBtn = document.getElementById('recordBtn');
-  const previewBtn = document.getElementById('previewBtn');
-  const exportBtn = document.getElementById('exportBtn');
-  const clearBtn = document.getElementById('clearPathBtn');
+function setupFovControl() {
   const fovSlider = document.getElementById('fovSlider');
   const fovValue = document.getElementById('fovValue');
-
-  recordBtn.onclick = () => {
-    fcToggleRecording();
-    recordBtn.innerText = fcRecording ? '⏹ 記録停止' : '🔴 記録開始';
-    recordBtn.classList.toggle('recording', fcRecording);
-    previewBtn.classList.remove('active');
+  fovSlider.oninput = () => {
+    fcFovDeg = parseInt(fovSlider.value);
+    fovValue.innerText = fcFovDeg + '°';
   };
 
+  const previewBtn = document.getElementById('previewBtn');
+  const exportBtn = document.getElementById('exportBtn');
+
   previewBtn.onclick = () => {
-    fcTogglePreview();
+    if (!hasAnyRecordedCamera()) return;
+    const turningOn = !fcPreviewMode;
+    fcSetPreviewMode(turningOn);
+    if (turningOn) {
+      const range = overallCameraRange();
+      if (range) { curTick = range.start; }
+      if (!isPlayingTimeline()) startTimelinePlayback();
+    }
     previewBtn.innerText = fcPreviewMode ? '👋 手動操作に戻る' : '🎬 プレビュー';
     previewBtn.classList.toggle('active', fcPreviewMode);
-    recordBtn.innerText = '🔴 記録開始';
-    recordBtn.classList.remove('recording');
   };
 
   exportBtn.onclick = () => {
     const started = fcStartExport();
     if (started) {
       document.getElementById('exportStatus').innerText = '⏺ 書き出し中...(終わるまでこの画面を離れないでください)';
-      recordBtn.disabled = true; previewBtn.disabled = true; exportBtn.disabled = true; clearBtn.disabled = true;
-      recordBtn.innerText = '🔴 記録開始'; recordBtn.classList.remove('recording');
+      previewBtn.disabled = true; exportBtn.disabled = true;
       previewBtn.innerText = '🎬 プレビュー'; previewBtn.classList.add('active');
     }
   };
 
-  clearBtn.onclick = () => {
-    if (fcCameraPath.size === 0) return;
-    if (confirm('記録したカメラワークを消しますか?(元に戻せません)')) {
-      fcClearCameraPath();
-      recordBtn.innerText = '🔴 記録開始'; recordBtn.classList.remove('recording');
-      previewBtn.innerText = '🎬 プレビュー'; previewBtn.classList.remove('active');
-    }
-  };
-
-  fovSlider.oninput = () => {
-    fcFovDeg = parseInt(fovSlider.value);
-    fovValue.innerText = fcFovDeg + '°';
-  };
-
-  updateCameraPathIndicator();
+  updateExportAvailability();
 }
 
-// fcCameraPathの内容が変わるたび(freecam.jsから)呼ばれ、タイムライン上に
-// 「撮影済みの範囲」を色付きで表示する。ボタンの有効/無効もここで揃える。
-function updateCameraPathIndicator() {
-  const overlay = document.getElementById('pathOverlay');
+// カメラブロックの記録状況が変わるたび(timeline.jsから)呼ばれ、
+// プレビュー/書き出しボタンの有効・無効を揃える。
+function updateExportAvailability() {
+  const hasPath = typeof hasAnyRecordedCamera === 'function' && hasAnyRecordedCamera();
   const previewBtn = document.getElementById('previewBtn');
   const exportBtn = document.getElementById('exportBtn');
-  const clearBtn = document.getElementById('clearPathBtn');
-  if (!overlay || !timeline || !timeline.frames.length) return;
-
-  const hasPath = fcCameraPath.size > 0;
   if (previewBtn) previewBtn.disabled = !hasPath;
   if (exportBtn) exportBtn.disabled = !hasPath;
-  if (clearBtn) clearBtn.disabled = !hasPath;
-
-  const total = Math.max(1, timeline.frames.length - 1);
-  const ticks = Array.from(fcCameraPath.keys()).sort((a, b) => a - b);
-  const segments = [];
-  let segStart = null, segEnd = null;
-  for (const t of ticks) {
-    if (segStart === null) { segStart = t; segEnd = t; }
-    else if (t <= segEnd + 3) { segEnd = t; } // 小さい隙間は同じ区間として表示する
-    else { segments.push([segStart, segEnd]); segStart = t; segEnd = t; }
-  }
-  if (segStart !== null) segments.push([segStart, segEnd]);
-
-  overlay.innerHTML = '';
-  for (const [s, e] of segments) {
-    const div = document.createElement('div');
-    div.style.position = 'absolute';
-    div.style.left = (100 * s / total) + '%';
-    div.style.width = Math.max(0.4, 100 * (e - s) / total) + '%';
-    div.style.top = '0'; div.style.bottom = '0';
-    div.style.background = '#e74c3c';
-    div.style.borderRadius = '2px';
-    overlay.appendChild(div);
-  }
 }
 
 // freecam.jsのMediaRecorder.onstopから呼ばれる(書き出し完了・ダウンロード開始後)
 function onExportFinished() {
   document.getElementById('exportStatus').innerText = '✅ 書き出し完了(ダウンロードを確認してください)';
   setTimeout(() => { document.getElementById('exportStatus').innerText = ''; }, 5000);
-  document.getElementById('recordBtn').disabled = false;
-  document.getElementById('previewBtn').disabled = false;
-  document.getElementById('exportBtn').disabled = false;
-  document.getElementById('clearPathBtn').disabled = false;
+  updateExportAvailability();
   document.getElementById('previewBtn').innerText = '🎬 プレビュー';
   document.getElementById('previewBtn').classList.remove('active');
 }
 
 
 function setupTimelineControls() {
-  const scrub = document.getElementById('scrub');
-  scrub.max = timeline.frames.length - 1;
-  scrub.addEventListener('input', e => {
-    curTick = parseInt(e.target.value);
-  });
-
   document.getElementById('playBtn').addEventListener('click', () => {
     if (playing) stopTimelinePlayback(); else startTimelinePlayback();
   });
@@ -457,8 +410,6 @@ function playTick() {
     const next = Math.min(curTick + ticksToAdvance, maxAvailable);
     curTick = next;
     lastFrameTime = now;
-    document.getElementById('scrub').value = curTick;
-    document.getElementById('scrub').max = maxAvailable;
     if (curTick >= maxAvailable) {
       if (streamingDone) {
         // 本当にここで終わり
