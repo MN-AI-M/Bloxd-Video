@@ -166,6 +166,7 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 
   allTimelines = null;
   streamingDone = false;
+  lastDecodeError = null;
   startFreecamStream();
 
   let editorShown = false;
@@ -204,7 +205,12 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 
     if (!editorShown) {
       // 最後まで処理してもエンティティが1体も見つからなかった場合
-      statusEl.innerText = 'プレイヤーの情報が見つかりませんでした。別のファイルでお試しください。';
+      if (lastDecodeError) {
+        statusEl.innerText = '⚠️ リプレイの解析中に問題が起きました: ' + lastDecodeError +
+          '\n(途中までは読めています。プレイヤーの情報がその範囲に無かった可能性があります)';
+      } else {
+        statusEl.innerText = 'プレイヤーの情報が見つかりませんでした。別のファイルでお試しください。';
+      }
       document.getElementById('processBtn').disabled = false;
     }
   } catch (e) {
@@ -217,6 +223,8 @@ document.getElementById('processBtn').addEventListener('click', async () => {
 // ============================================================
 // ストリーミングで届いた1バッチぶんを反映する
 // ============================================================
+
+let lastDecodeError = null;
 
 function handleStreamingPartial(partial) {
   if (!allTimelines) {
@@ -246,10 +254,17 @@ function handleStreamingPartial(partial) {
   retractFreecamFaces(partial.retracted_positions, partial.retracted_faces);
   appendFreecamStreamFaces(partial.new_faces, partial.palette);
 
+  if (partial.decode_error) {
+    lastDecodeError = partial.decode_error;
+    console.error('リプレイのデコードが途中で止まりました:', partial.decode_error);
+  }
+
   const pct = partial.total_ticks ? Math.round(100 * partial.processed_tick / partial.total_ticks) : 100;
   const faceCountText = `面数: ${(fcMeshFaces ? fcMeshFaces.length : 0).toLocaleString()}`;
   if (partial.truncated) {
     setStatusText(`⚠️ データ量が多すぎたため、途中で打ち切りました(${pct}%まで処理・${faceCountText}）`);
+  } else if (partial.done && partial.decode_error) {
+    setStatusText(`⚠️ デコードが途中で止まりました(${pct}%まで・${faceCountText})。詳細はコンソールを確認してください。`);
   } else if (partial.done) {
     setStatusText(`${faceCountText} / 完了`);
   } else {
