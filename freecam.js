@@ -205,24 +205,19 @@ function startFreecamStream() {
   }
 }
 
-// newFaces: 今回新しく分かった面([[x,y,z,dirCode,paletteIdx,scale,revealTick],...])
-// newPalette: 現時点での完全なパレット配列(毎回全体を受け取る想定)
-function appendFreecamStreamFaces(newFaces, newPalette) {
-  fcMeshPalette = newPalette;
-  if (!newFaces.length) return;
-
-  if (!worldOriginSet) {
-    setWorldOrigin(newFaces[0][0], newFaces[0][1], newFaces[0][2]);
-  }
-
+// facesの各要素([x,y,z,dirCode,paletteIdx,scale,revealTick])を頂点データに
+// 変換して、targetArrayの末尾に積む(fcMeshPalette/fcUVRectsRawの「今の」
+// 内容を使う)。appendFreecamStreamFaces と _rebuildFreecamVertexData の
+// 両方から使う共通処理。
+function _pushFaceVertices(faces, targetArray) {
+  if (!faces.length) return;
   const paletteUVRects = fcMeshPalette.map(p => (fcUVRectsRaw && fcUVRectsRaw.get(p.texture)) || [0, 0, 1, 1]);
   // 面の向きごとの「正しい」貼り方までは追い込んでおらず、正方形をそのまま
   // 貼る簡易実装(石・土のような向きを気にしない見た目ならほぼ気にならない)。
   const cornerUV = [[0, 1], [1, 1], [1, 0], [0, 0]];
   const order = [0, 1, 2, 0, 2, 3];
 
-  for (const f of newFaces) {
-    fcMeshFaces.push(f);
+  for (const f of faces) {
     const wx = f[0], wy = f[1], wz = f[2], dirCode = f[3], pIdx = f[4], scale = f[5] || 1, revealTick = f[6] || 0;
     const bx = wx - worldOriginX, by = wy - worldOriginY, bz = wz - worldOriginZ;
     const rect = paletteUVRects[pIdx] || [0, 0, 1, 1];
@@ -233,15 +228,57 @@ function appendFreecamStreamFaces(newFaces, newPalette) {
       const [cu, cv] = cornerUV[oi];
       const u = rect[0] + cu * (rect[2] - rect[0]);
       const v = rect[1] + cv * (rect[3] - rect[1]);
-      fcVertexData.push(bx + ox * scale, by + oy, bz + oz * scale, u, v, brightness, revealTick);
+      targetArray.push(bx + ox * scale, by + oy, bz + oz * scale, u, v, brightness, revealTick);
     }
   }
+}
 
+function _uploadFreecamVertexData() {
   fcVertexCount = fcVertexData.length / 7;
   if (fcGl) {
     fcGl.bindBuffer(fcGl.ARRAY_BUFFER, fcVbo);
     fcGl.bufferData(fcGl.ARRAY_BUFFER, new Float32Array(fcVertexData), fcGl.DYNAMIC_DRAW);
   }
+}
+
+// newFaces: 今回新しく分かった面([[x,y,z,dirCode,paletteIdx,scale,revealTick],...])
+// newPalette: 現時点での完全なパレット配列(毎回全体を受け取る想定)
+function appendFreecamStreamFaces(newFaces, newPalette) {
+  fcMeshPalette = newPalette;
+  if (!newFaces.length) return;
+
+  if (!worldOriginSet) {
+    setWorldOrigin(newFaces[0][0], newFaces[0][1], newFaces[0][2]);
+  }
+
+  for (const f of newFaces) fcMeshFaces.push(f);
+  _pushFaceVertices(newFaces, fcVertexData);
+  _uploadFreecamVertexData();
+}
+
+// 撤回。retractedPositions: [[x,y,z],...](その位置の全方向を消す。eP編集用)
+// retractedFaces: [[x,y,z,dirCode],...](その面だけを消す。チャンク境界の
+// 暫定面の訂正用)。両方ともfcMeshFacesから対象を取り除き、頂点データを
+// 作り直す(頻繁には起きない想定なので、全体作り直しで十分)。
+function retractFreecamFaces(retractedPositions, retractedFaces) {
+  const hasPositions = retractedPositions && retractedPositions.length;
+  const hasFaces = retractedFaces && retractedFaces.length;
+  if (!hasPositions && !hasFaces) return;
+
+  const posSet = hasPositions ? new Set(retractedPositions.map(p => p[0] + ',' + p[1] + ',' + p[2])) : null;
+  const faceSet = hasFaces ? new Set(retractedFaces.map(f => f[0] + ',' + f[1] + ',' + f[2] + ',' + f[3])) : null;
+
+  const kept = fcMeshFaces.filter(f => {
+    if (posSet && posSet.has(f[0] + ',' + f[1] + ',' + f[2])) return false;
+    if (faceSet && faceSet.has(f[0] + ',' + f[1] + ',' + f[2] + ',' + f[3])) return false;
+    return true;
+  });
+  if (kept.length === fcMeshFaces.length) return; // 消える面が無かった
+
+  fcMeshFaces = kept;
+  fcVertexData = [];
+  _pushFaceVertices(fcMeshFaces, fcVertexData);
+  _uploadFreecamVertexData();
 }
 
 

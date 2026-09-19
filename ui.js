@@ -240,6 +240,10 @@ function handleStreamingPartial(partial) {
     }
   }
 
+  // 撤回(既に出した面のうち、後から不要と分かった分)を、新しい面を
+  // 追加する前に適用する(この順番でないと、置き換え後の正しい面まで
+  // 一緒に消してしまう)
+  retractFreecamFaces(partial.retracted_positions, partial.retracted_faces);
   appendFreecamStreamFaces(partial.new_faces, partial.palette);
 
   const pct = partial.total_ticks ? Math.round(100 * partial.processed_tick / partial.total_ticks) : 100;
