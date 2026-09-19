@@ -920,6 +920,14 @@ class StreamingMeshProcessor:
         self.pending_edits = {}       # (x,y,z) -> 最後に見たblockId(最後にまとめて処理する)
         self.pending_edit_tick = {}
 
+        # 新しく見つかったチャンクは、その場ですぐ面を計算せず1バッチぶん
+        # 待ってから計算する(最初のバッチだけは体感速度優先で即時処理する)。
+        # こうすることで、隣接チャンクが次のバッチまでに見つかってれば、
+        # 境界の判定を正しく行える(=チャンクが別バッチにまたがって発見された
+        # 時に境界へ薄い余分な面が残る問題を大きく減らせる)。
+        self.pending_chunk_queue = []
+        self.is_first_batch = True
+
         self.entity_state = {}
         self.entities_out = {}
 
@@ -1015,9 +1023,14 @@ class StreamingMeshProcessor:
         2パス構成にしてある: まずこのバッチ範囲のチャンクの「存在」を
         全部先に確定させてから(1パス目)、新しく見つかったチャンクの面を
         まとめて計算する(2パス目)。これにより、同じバッチ内で隣接する
-        チャンクどうしなら、境界の判定を正しく行える(片方がまだ無いと
-        誤判定して余分な面を出す、という問題を防げる)。この問題が残るのは
-        「隣り合うチャンクが別々のバッチにまたがって発見された場合」だけになる。"""
+        チャンクどうしなら、境界の判定を正しく行える。
+
+        さらに、2パス目で実際に面を計算するのは「前回のバッチで見つかった
+        チャンク」にしてある(今回新しく見つかった分は、次回に回す)。
+        こうすることで、隣接チャンクが「次のバッチ」で見つかった場合でも、
+        面を計算する時点では既にchunk_eventsに反映済みになっており、
+        正しく境界判定できる。最初のバッチだけは、体感速度を優先して
+        その場ですぐ計算する(最後のバッチでは、待ってた分をまとめて出す)。"""
         new_faces = []
         entity_frame_updates = {}  # entityId -> 今回追加されたフレームのリスト
         newly_discovered_chunks = []  # このバッチで新しく見つかった(まだ面を計算してない)チャンク
@@ -1057,10 +1070,19 @@ class StreamingMeshProcessor:
                 self.entities_out[entity_id]['displayName'] = state.get(1)
                 entity_frame_updates.setdefault(entity_id, []).append(frame)
 
-        # 2パス目: このバッチで新しく見つかった全チャンクの面をまとめて計算する
-        # (この時点で、同じバッチ内の他のチャンクは全部chunk_eventsに
-        #  反映済みなので、境界の判定がバッチ内では正しく行える)
-        for key in newly_discovered_chunks:
+        # 2パス目: 今回計算するのは「前回持ち越したチャンク」(初回だけ例外で
+        # 今回発見ぶんをそのまま使う)。今回新しく見つかったチャンクは、
+        # 次回に持ち越す。
+        was_first_batch = self.is_first_batch
+        self.is_first_batch = False
+        if was_first_batch:
+            chunks_to_emit_now = newly_discovered_chunks
+            self.pending_chunk_queue = []
+        else:
+            chunks_to_emit_now = self.pending_chunk_queue
+            self.pending_chunk_queue = newly_discovered_chunks
+
+        for key in chunks_to_emit_now:
             if key in self.emitted_chunks:
                 continue
             self.emitted_chunks.add(key)
@@ -1075,6 +1097,15 @@ class StreamingMeshProcessor:
         self.done = self.truncated or (self.next_tick >= self.total_ticks)
 
         if self.done and not self.truncated:
+            # 最後に、持ち越しキューに残ってる分(最後のバッチで見つかった分)を
+            # まとめて出す
+            for key in self.pending_chunk_queue:
+                if key not in self.emitted_chunks:
+                    self.emitted_chunks.add(key)
+                    faces = self._emit_chunk_faces(key)
+                    new_faces.extend(faces)
+                    self._total_faces += len(faces)
+            self.pending_chunk_queue = []
             new_faces.extend(self._finalize_edits())
 
         result = {
