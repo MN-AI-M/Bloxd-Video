@@ -17,7 +17,9 @@ rleのデコード方式(ゲーム本体のJSソースから直接発見、確�
 """
 import sys, csv, json
 sys.path.insert(0, '.')
+import numpy as np
 from bloxdreplay_decode_full import make_decoder
+from build_all_timelines import FIELD_NAMES
 
 CHUNK_SIZE = 32
 AIR_ID = 0  # IDリストに存在しない0番はAir(空気)とみなす
@@ -376,7 +378,7 @@ def _build_near_cells(positions, radius, grid_size):
     return near_cells
 
 
-def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=False, near_center=None):
+def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=False, near_center=None, chunk_cache=None):
     """既にmake_decoder()でデコード済みの res を受け取って、
     {palette, faces, bbox, truncated} の辞書を返す。
 
@@ -384,6 +386,11 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
         近傍判定の基準にする。(x, z)を渡すと、代わりにその座標を中心に
         近傍判定する(自由カメラモードで、カメラの現在位置を中心に
         LODを再計算する用)。
+
+    chunk_cache: チャンクのデコード結果(32³ブロック配列)を呼び出しをまたいで
+        使い回すための辞書。web_glue.py側で1回作って毎回同じものを渡すと、
+        同じチャンクのRLEデコードが2回走らなくなる。Noneならこの呼び出し限りの
+        使い捨てキャッシュになる(単体で使う分には今まで通り)。
 
     faces: [[x, y, z, dirCode, paletteIdx, scale, revealTick], ...]
         (x,y,z)はそのブロック(またはLODの塊)自体のワールド座標
@@ -420,7 +427,7 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
                 if key not in chunk_tick:  # 再送されることがあるので、最初に見えた時刻を採用
                     chunk_tick[key] = tick_num
 
-    decoded_cache = {}
+    decoded_cache = {} if chunk_cache is None else chunk_cache.setdefault('blocks', {})
     def get_chunk_blocks(key):
         if key not in decoded_cache:
             decoded_cache[key] = decode_rle(chunk_events[key]['rle']) if key in chunk_events else None
@@ -591,12 +598,500 @@ def build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbo
     return {'palette': palette_list, 'faces': faces, 'bbox': bbox, 'truncated': truncated}
 
 
+# ============================================================
+# 自由カメラのLOD再計算専用(チャンク単位キャッシュ版)
+# ============================================================
+#
+# 自由カメラはカメラが約1チャンク動くたびにLODを再計算する(freecam.js参照)。
+# 上のbuild_voxel_mesh_from_decoded()をそのまま毎回呼ぶと、近く/遠くの分類が
+# 変わってないチャンクまで含めて、読み込み済みの全チャンクを毎回スキャンし
+# 直すことになり無駄が大きい。
+#
+# この関数は、チャンクごとに「近くとして処理した場合の面」「遠くとして処理
+# した場合のスーパーセルへの寄与」を別々にキャッシュしておき、呼び出しの
+# たびに「このチャンクは今回どちらに分類されるか」だけ判定して、対応する
+# キャッシュを使い回す。初めて見る(または初めてその分類になる)チャンクだけ
+# 実際に計算される。
+#
+# 近く/遠くの判定は(build_voxel_mesh_from_decodedの既定パスと違って)
+# チャンク単位で行う。境界の精度は多少甘くなる(最大チャンク1個ぶん)が、
+# チャンクごとにキャッシュできるようになる方が実用上のメリットが大きい。
+# 6方向それぞれの (dir_code, 軸(0=x,1=y,2=z), 方向(+1/-1))
+_FACE_AXIS_DIR = [
+    (0, 0, 1), (1, 0, -1),   # +x, -x
+    (2, 1, 1), (3, 1, -1),   # +y, -y
+    (4, 2, 1), (5, 2, -1),   # +z, -z
+]
+
+
+def _chunk_exposed_faces_numpy(arr):
+    """arr: shape (32,32,32) のブロックID配列(axis順=x,y,z)。
+    戻り値: dir_code -> bool配列(32,32,32)。
+    True = そのボクセルはその方向に露出している「暫定」判定。
+    チャンクの端(隣のチャンクを見ないと確定できない面)は常にTrueにしてあり、
+    呼び出し側でget_block_slowを使って確定させる必要がある。
+    numpyの配列シフト+比較だけで済むので、Pythonのfor文で1ボクセルずつ
+    6方向をチェックするより大幅に速い(特に、面が1枚も出ない=完全に
+    埋もれてるボクセルの判定がタダ同然になる)。"""
+    solid = arr != AIR_ID
+    masks = {}
+    m = np.ones_like(solid); m[:-1, :, :] = ~solid[1:, :, :];  masks[0] = solid & m
+    m = np.ones_like(solid); m[1:, :, :]  = ~solid[:-1, :, :]; masks[1] = solid & m
+    m = np.ones_like(solid); m[:, :-1, :] = ~solid[:, 1:, :];  masks[2] = solid & m
+    m = np.ones_like(solid); m[:, 1:, :]  = ~solid[:, :-1, :]; masks[3] = solid & m
+    m = np.ones_like(solid); m[:, :, :-1] = ~solid[:, :, 1:];  masks[4] = solid & m
+    m = np.ones_like(solid); m[:, :, 1:]  = ~solid[:, :, :-1]; masks[5] = solid & m
+    return masks
+
+
+def _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, palette_idx_fn):
+    """1チャンクぶんの面を計算する(numpyで暫定判定→チャンクの端だけ
+    get_block_slowで確定、という2段構え)。戻り値は今まで通り
+    [(wx,wy,wz,dirCode,paletteIdx,1,revealTick), ...]。"""
+    masks = _chunk_exposed_faces_numpy(arr)
+    out = []
+
+    # このチャンクに出てくるユニークなblock_idぶんだけ、パレット変換をまとめて行う
+    solid_all = arr != AIR_ID
+    unique_ids = np.unique(arr[solid_all]) if solid_all.any() else np.empty(0, dtype=arr.dtype)
+    id_to_pidx = {int(bid): palette_idx_fn(int(bid)) for bid in unique_ids}
+
+    for dir_code, axis, direction in _FACE_AXIS_DIR:
+        xs, ys, zs = np.nonzero(masks[dir_code])
+        if len(xs) == 0:
+            continue
+        local = (xs, ys, zs)
+        boundary_val = CHUNK_SIZE - 1 if direction == 1 else 0
+        is_boundary = local[axis] == boundary_val
+
+        dx = direction if axis == 0 else 0
+        dy = direction if axis == 1 else 0
+        dz = direction if axis == 2 else 0
+
+        # チャンク内部(隣もこのチャンク内にあり、numpyの判定だけで確定済み)
+        for i in np.nonzero(~is_boundary)[0]:
+            lx, ly, lz = int(xs[i]), int(ys[i]), int(zs[i])
+            wx, wy, wz = base_x + lx, base_y + ly, base_z + lz
+            out.append((wx, wy, wz, dir_code, id_to_pidx[int(arr[lx, ly, lz])], 1, int(reveal_arr[lx, ly, lz])))
+
+        # チャンクの端(隣のチャンクを実際に見て確定させる必要がある)
+        for i in np.nonzero(is_boundary)[0]:
+            lx, ly, lz = int(xs[i]), int(ys[i]), int(zs[i])
+            wx, wy, wz = base_x + lx, base_y + ly, base_z + lz
+            nb = get_block_slow(wx + dx, wy + dy, wz + dz)
+            if nb is None or nb == AIR_ID:
+                out.append((wx, wy, wz, dir_code, id_to_pidx[int(arr[lx, ly, lz])], 1, int(reveal_arr[lx, ly, lz])))
+
+    return out
+
+
+def build_voxel_mesh_near_camera(res, id_to_root_path, asset_master_path, near_center, cache, verbose=False, near_radius=None):
+    """cache: build_voxel_mesh_from_decoded()のchunk_cache引数と同じ辞書を
+    そのまま渡す想定(web_glue.py側で1回だけ作って使い回す)。
+    以下のキーを内部で使う(無ければ初回に作る):
+      cache['blocks']      … チャンクのデコード済みブロック配列
+      cache['near_faces']  … チャンクごとの「近く」処理結果(面のリスト)
+      cache['far_cells']   … チャンクごとの「遠く」処理結果(スーパーセルへの寄与)
+      cache['chunk_events'] / ['chunk_tick'] / ['edits'] / ['edit_tick']
+      cache['palette_map'] / ['palette_list'] … パレットも使い回す(番号が
+          呼び出しをまたいで安定するので、JS側の再構築コストも下がる)
+
+    near_radius: Noneなら通常のLOD_NEAR_RADIUSを使う。float('inf')を渡すと
+        全チャンクが常に「近く」判定になり、LOD自体が事実上無効になる
+        (=カメラがどこに動いても再計算が要らなくなる。自由カメラの
+        フル解像度モード用)。
+    """
+    radius = LOD_NEAR_RADIUS if near_radius is None else near_radius
+    id_to_root = load_id_to_root(id_to_root_path)
+    asset_lookup = load_asset_lookup(asset_master_path)
+
+    if 'palette_map' not in cache:
+        cache['palette_map'], cache['palette_list'] = {}, []
+    palette_map, palette_list = cache['palette_map'], cache['palette_list']
+
+    def palette_idx(block_id):
+        root, _ = id_to_root.get(str(block_id), (None, None))
+        asset = asset_lookup.get(root, {'texture': '', 'model': '', 'asset_type': ''}) if root else {'texture': '', 'model': '', 'asset_type': ''}
+        key = (root, asset['texture'], asset['model'], asset['asset_type'])
+        if key not in palette_map:
+            palette_map[key] = len(palette_list)
+            palette_list.append({'root_name': root, 'texture': asset['texture'], 'model': asset['model'], 'asset_type': asset['asset_type']})
+        return palette_map[key]
+
+    if 'chunk_events' not in cache:
+        chunk_events, chunk_tick = {}, {}
+        for tick_num, t in enumerate(res['ticks']):
+            for e in t['structuralEvents']:
+                if e['type'] == 'chunkAdded':
+                    key = (e['chunkX'], e['chunkY'], e['chunkZ'])
+                    chunk_events[key] = e
+                    if key not in chunk_tick:
+                        chunk_tick[key] = tick_num
+        edits, edit_tick = {}, {}
+        for tick_num, t in enumerate(res['ticks']):
+            for e in t['structuralEvents']:
+                if e['type'] == 'eP':
+                    x, y, z = e['pos']
+                    edits[(x, y, z)] = e['toBlockId']
+                    edit_tick[(x, y, z)] = tick_num
+        cache['chunk_events'], cache['chunk_tick'] = chunk_events, chunk_tick
+        cache['edits'], cache['edit_tick'] = edits, edit_tick
+    chunk_events, chunk_tick = cache['chunk_events'], cache['chunk_tick']
+    edits, edit_tick = cache['edits'], cache['edit_tick']
+
+    blocks_cache = cache.setdefault('blocks', {})
+    def get_chunk_blocks(key):
+        if key not in blocks_cache:
+            blocks_cache[key] = decode_rle(chunk_events[key]['rle']) if key in chunk_events else None
+        return blocks_cache[key]
+
+    def get_block_slow(wx, wy, wz):
+        key3 = (wx, wy, wz)
+        if key3 in edits:
+            return edits[key3]
+        cx, lx = divmod(wx, CHUNK_SIZE)
+        cy, ly = divmod(wy, CHUNK_SIZE)
+        cz, lz = divmod(wz, CHUNK_SIZE)
+        blocks = get_chunk_blocks((cx, cy, cz))
+        if blocks is None:
+            return None
+        idx = lz + ly * CHUNK_SIZE + lx * CHUNK_SIZE * CHUNK_SIZE
+        return blocks[idx]
+
+    # このチャンクに属するeP編集だけを毎回全件スキャンせずに済むよう、
+    # 一度だけチャンクごとに振り分けておく
+    if 'edits_by_chunk' not in cache:
+        edits_by_chunk = {}
+        for (wx, wy, wz) in edits:
+            ck = (wx // CHUNK_SIZE, wy // CHUNK_SIZE, wz // CHUNK_SIZE)
+            edits_by_chunk.setdefault(ck, []).append((wx, wy, wz))
+        cache['edits_by_chunk'] = edits_by_chunk
+    edits_by_chunk = cache['edits_by_chunk']
+
+    # チャンクの32^3配列(eP編集を適用済み)とreveal_tick配列を、numpy版の
+    # 面計算に使い回すためのキャッシュ
+    edited_array_cache = cache.setdefault('edited_arrays', {})
+    def get_chunk_array(chunk_key):
+        if chunk_key in edited_array_cache:
+            return edited_array_cache[chunk_key]
+        blocks = get_chunk_blocks(chunk_key)
+        if blocks is None:
+            edited_array_cache[chunk_key] = (None, None)
+            return None, None
+        arr = np.asarray(blocks, dtype=np.int32).reshape(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE).copy()
+        reveal_arr = np.full((CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE), chunk_tick.get(chunk_key, 0), dtype=np.int64)
+        cx, cy, cz = chunk_key
+        base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
+        for (wx, wy, wz) in edits_by_chunk.get(chunk_key, []):
+            lx, ly, lz = wx - base_x, wy - base_y, wz - base_z
+            arr[lx, ly, lz] = edits[(wx, wy, wz)]
+            reveal_arr[lx, ly, lz] = edit_tick[(wx, wy, wz)]
+        edited_array_cache[chunk_key] = (arr, reveal_arr)
+        return arr, reveal_arr
+
+    def compute_near_faces(chunk_key):
+        arr, reveal_arr = get_chunk_array(chunk_key)
+        if arr is None:
+            return []
+        cx, cy, cz = chunk_key
+        base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
+        return _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, get_block_slow, palette_idx)
+
+    def compute_far_cells(chunk_key):
+        arr, reveal_arr = get_chunk_array(chunk_key)
+        if arr is None:
+            return {}
+        cx, cy, cz = chunk_key
+        base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
+        solid = arr != AIR_ID
+        xs, ys, zs = np.nonzero(solid)  # numpyで一括抽出(埋もれたブロックも含む全ての実ブロック)
+        contrib = {}
+        for i in range(len(xs)):
+            lx, ly, lz = int(xs[i]), int(ys[i]), int(zs[i])
+            wx, wy, wz = base_x + lx, base_y + ly, base_z + lz
+            key = (wx // LOD_FACTOR_XZ, wy, wz // LOD_FACTOR_XZ)
+            if key not in contrib:
+                contrib[key] = (int(arr[lx, ly, lz]), int(reveal_arr[lx, ly, lz]))
+        return contrib
+
+    ncx, ncz = near_center
+    def chunk_is_near(chunk_key):
+        cx, cy, cz = chunk_key
+        base_x, base_z = cx * CHUNK_SIZE, cz * CHUNK_SIZE
+        closest_x = min(max(ncx, base_x), base_x + CHUNK_SIZE - 1)
+        closest_z = min(max(ncz, base_z), base_z + CHUNK_SIZE - 1)
+        return abs(closest_x - ncx) <= radius and abs(closest_z - ncz) <= radius
+
+    near_faces_cache = cache.setdefault('near_faces', {})
+    far_cells_cache = cache.setdefault('far_cells', {})
+
+    faces = []
+    far_cells = {}
+    truncated = False
+    for chunk_key in chunk_events:
+        if chunk_is_near(chunk_key):
+            if chunk_key not in near_faces_cache:
+                near_faces_cache[chunk_key] = compute_near_faces(chunk_key)
+            faces.extend(near_faces_cache[chunk_key])
+        else:
+            if chunk_key not in far_cells_cache:
+                far_cells_cache[chunk_key] = compute_far_cells(chunk_key)
+            far_cells.update(far_cells_cache[chunk_key])
+        if len(faces) >= MAX_MESH_FACES:
+            truncated = True
+            break
+
+    if not truncated:
+        for (sx, sy, sz), (bid, reveal_tick) in far_cells.items():
+            aidx = palette_idx(bid)
+            for name, dx, dy, dz in VOXEL_MESH_DIRS:
+                if (sx + dx, sy + dy, sz + dz) in far_cells:
+                    continue
+                wx, wy, wz = sx * LOD_FACTOR_XZ, sy, sz * LOD_FACTOR_XZ
+                faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, LOD_FACTOR_XZ, reveal_tick))
+            if len(faces) >= MAX_MESH_FACES:
+                truncated = True
+                break
+
+    minX=minY=minZ=None; maxX=maxY=maxZ=None
+    for f in faces:
+        wx, wy, wz = f[0], f[1], f[2]
+        if minX is None or wx < minX: minX = wx
+        if maxX is None or wx > maxX: maxX = wx
+        if minY is None or wy < minY: minY = wy
+        if maxY is None or wy > maxY: maxY = wy
+        if minZ is None or wz < minZ: minZ = wz
+        if maxZ is None or wz > maxZ: maxZ = wz
+    bbox = [minX or 0, maxX or 0, minY or 0, maxY or 0, minZ or 0, maxZ or 0]
+
+    if verbose:
+        print(f"[自由カメラ用再計算] near_center=({ncx},{ncz}) 面数={len(faces)} "
+              f"(キャッシュ済みチャンク: 近く{len(near_faces_cache)}件・遠く{len(far_cells_cache)}件)")
+
+    return {'palette': palette_list, 'faces': faces, 'bbox': bbox, 'truncated': truncated}
+
+
 def build_voxel_mesh(replay_path, id_to_root_path, asset_master_path, out_path):
     res = make_decoder(replay_path)
     result = build_voxel_mesh_from_decoded(res, id_to_root_path, asset_master_path, verbose=True)
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False)
     print(f"書き出し: {out_path}")
+
+
+# ============================================================
+# ストリーミング処理(「できたところから見せる」方式)
+# ============================================================
+#
+# リプレイは本質的に時系列データ(tickの並び)なので、全部読み終わるまで
+# 何も見せないのではなく、YouTubeの動画処理のように「少し処理しては
+# できた分を返す」を繰り返す方式にした。
+#
+# process_batch()を繰り返し呼ぶと、そのたびに新しく見つかった地形の面と、
+# 新しく増えたタイムラインのフレームだけを返す(全部を毎回返さない)。
+# JS側はそれを既存のジオメトリ・タイムラインに継ぎ足していく。
+#
+# 設計上の割り切り:
+# - チャンク(地形本体)は見つかり次第すぐ面を計算して返す。
+#   LOD(近く/遠くの間引き)はやらない(自由カメラモードと同じく常に
+#   フル解像度。LODの基準=プレイヤーの通った場所は全体を見ないと
+#   決まらず、ストリーミングと相性が悪いため)。
+# - eP編集(手動でのブロック設置/破壊)は、同じ場所が後で上書きされる
+#   可能性があるので、全tickを見終わるまで確定できない。地形本体とは
+#   別に、最後にまとめて処理する(件数は通常少ないので軽い)。
+# - チャンクの発見順によっては、隣のチャンクがまだ来てない段階で境界面を
+#   「露出してる」と暫定判定することがある。実際は後から隣が来て
+#   埋まるはずの面が、それまでの短い間だけ見えてしまう可能性がある
+#   (通常は近い時刻に隣接チャンクも読み込まれるので、すぐ解消される想定)。
+class StreamingMeshProcessor:
+    def __init__(self, res, id_to_root_path, asset_master_path):
+        self.res = res
+        self.id_to_root = load_id_to_root(id_to_root_path)
+        self.asset_lookup = load_asset_lookup(asset_master_path)
+
+        self.palette_map = {}
+        self.palette_list = []
+
+        self.chunk_events = {}
+        self.chunk_tick = {}
+        self.decoded_cache = {}
+        self.emitted_chunks = set()
+
+        self.pending_edits = {}       # (x,y,z) -> 最後に見たblockId(最後にまとめて処理する)
+        self.pending_edit_tick = {}
+
+        self.entity_state = {}
+        self.entities_out = {}
+
+        self.next_tick = 0
+        self.total_ticks = len(res['ticks'])
+        self.done = False
+        self.truncated = False
+
+        self.minX = self.minY = self.minZ = None
+        self.maxX = self.maxY = self.maxZ = None
+
+        self.ticks_per_second = (res.get('meta') or {}).get('gG') or 30
+        self.local_player_entity_id = (res.get('meta') or {}).get('localPlayerEntityId')
+
+        self._total_faces = 0
+
+    def _palette_idx(self, block_id):
+        root, _ = self.id_to_root.get(str(block_id), (None, None))
+        asset = self.asset_lookup.get(root, {'texture': '', 'model': '', 'asset_type': ''}) if root else {'texture': '', 'model': '', 'asset_type': ''}
+        key = (root, asset['texture'], asset['model'], asset['asset_type'])
+        if key not in self.palette_map:
+            self.palette_map[key] = len(self.palette_list)
+            self.palette_list.append({'root_name': root, 'texture': asset['texture'], 'model': asset['model'], 'asset_type': asset['asset_type']})
+        return self.palette_map[key]
+
+    def _get_chunk_blocks(self, key):
+        # 「まだ読み込まれてない」(=None)は、後で実際に読み込まれる可能性が
+        # あるのでキャッシュしない(キャッシュすると、後からチャンクが
+        # 来ても古いNoneのままになってしまうバグになる)。
+        # 成功したデコード結果だけキャッシュする。
+        if key in self.decoded_cache:
+            return self.decoded_cache[key]
+        if key not in self.chunk_events:
+            return None
+        self.decoded_cache[key] = decode_rle(self.chunk_events[key]['rle'])
+        return self.decoded_cache[key]
+
+    def _get_block_slow(self, wx, wy, wz):
+        if (wx, wy, wz) in self.pending_edits:
+            return self.pending_edits[(wx, wy, wz)]
+        cx, lx = divmod(wx, CHUNK_SIZE)
+        cy, ly = divmod(wy, CHUNK_SIZE)
+        cz, lz = divmod(wz, CHUNK_SIZE)
+        blocks = self._get_chunk_blocks((cx, cy, cz))
+        if blocks is None:
+            return None
+        idx = lz + ly * CHUNK_SIZE + lx * CHUNK_SIZE * CHUNK_SIZE
+        return blocks[idx]
+
+    def _note_bounds(self, wx, wy, wz):
+        if self.minX is None or wx < self.minX: self.minX = wx
+        if self.maxX is None or wx > self.maxX: self.maxX = wx
+        if self.minY is None or wy < self.minY: self.minY = wy
+        if self.maxY is None or wy > self.maxY: self.maxY = wy
+        if self.minZ is None or wz < self.minZ: self.minZ = wz
+        if self.maxZ is None or wz > self.maxZ: self.maxZ = wz
+
+    def _emit_chunk_faces(self, chunk_key):
+        blocks = self._get_chunk_blocks(chunk_key)
+        if blocks is None:
+            return []
+        arr = np.asarray(blocks, dtype=np.int32).reshape(CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE)
+        reveal_arr = np.full((CHUNK_SIZE, CHUNK_SIZE, CHUNK_SIZE), self.chunk_tick.get(chunk_key, 0), dtype=np.int64)
+        cx, cy, cz = chunk_key
+        base_x, base_y, base_z = cx * CHUNK_SIZE, cy * CHUNK_SIZE, cz * CHUNK_SIZE
+        faces = _numpy_chunk_faces(arr, reveal_arr, base_x, base_y, base_z, self._get_block_slow, self._palette_idx)
+        for f in faces:
+            self._note_bounds(f[0], f[1], f[2])
+        return faces
+
+    def _finalize_edits(self):
+        """eP編集(手動での設置/破壊)を最後にまとめて処理する。
+        同じ場所が複数回編集されてても、pending_editsには最後の値しか
+        残ってないので、そのまま「今の状態」として扱える。"""
+        faces = []
+        for (wx, wy, wz), bid in self.pending_edits.items():
+            if bid == AIR_ID:
+                continue
+            aidx = self._palette_idx(bid)
+            reveal_tick = self.pending_edit_tick[(wx, wy, wz)]
+            for name, dx, dy, dz in VOXEL_MESH_DIRS:
+                nb = self._get_block_slow(wx + dx, wy + dy, wz + dz)
+                if nb is None or nb == AIR_ID:
+                    faces.append((wx, wy, wz, VOXEL_MESH_DIR_CODE[name], aidx, 1, reveal_tick))
+                    self._note_bounds(wx, wy, wz)
+        return faces
+
+    def process_batch(self, batch_ticks=500):
+        """次のbatch_ticksぶんを処理して、今回新しく分かった分だけを返す。
+        戻り値の 'done' がTrueになったら、もう呼ぶ必要はない
+        (その回にeP編集ぶんもまとめて含まれてる)。
+
+        2パス構成にしてある: まずこのバッチ範囲のチャンクの「存在」を
+        全部先に確定させてから(1パス目)、新しく見つかったチャンクの面を
+        まとめて計算する(2パス目)。これにより、同じバッチ内で隣接する
+        チャンクどうしなら、境界の判定を正しく行える(片方がまだ無いと
+        誤判定して余分な面を出す、という問題を防げる)。この問題が残るのは
+        「隣り合うチャンクが別々のバッチにまたがって発見された場合」だけになる。"""
+        new_faces = []
+        entity_frame_updates = {}  # entityId -> 今回追加されたフレームのリスト
+        newly_discovered_chunks = []  # このバッチで新しく見つかった(まだ面を計算してない)チャンク
+
+        start_tick = self.next_tick
+        end_tick = min(self.total_ticks, start_tick + batch_ticks)
+
+        # 1パス目: チャンクの存在・eP編集・タイムラインを全部先に反映する
+        for tick_num in range(start_tick, end_tick):
+            t = self.res['ticks'][tick_num]
+
+            for e in t['structuralEvents']:
+                if e['type'] == 'chunkAdded':
+                    key = (e['chunkX'], e['chunkY'], e['chunkZ'])
+                    self.chunk_events[key] = e
+                    if key not in self.chunk_tick:
+                        self.chunk_tick[key] = tick_num
+                    if key not in self.emitted_chunks:
+                        newly_discovered_chunks.append(key)
+                elif e['type'] == 'eP':
+                    x, y, z = e['pos']
+                    self.pending_edits[(x, y, z)] = e['toBlockId']
+                    self.pending_edit_tick[(x, y, z)] = tick_num
+
+            for entity_id, deltas in t.get('entities', {}).items():
+                state = self.entity_state.setdefault(entity_id, {})
+                for d in deltas:
+                    state[d['i']] = d['v']
+                if entity_id not in self.entities_out:
+                    self.entities_out[entity_id] = {'name': None, 'displayName': None, 'frames': []}
+                frame = {'tick': tick_num, 'time': round(tick_num / self.ticks_per_second, 3)}
+                for i, name in FIELD_NAMES.items():
+                    if i in state:
+                        frame[name] = state[i]
+                self.entities_out[entity_id]['frames'].append(frame)
+                self.entities_out[entity_id]['name'] = state.get(0)
+                self.entities_out[entity_id]['displayName'] = state.get(1)
+                entity_frame_updates.setdefault(entity_id, []).append(frame)
+
+        # 2パス目: このバッチで新しく見つかった全チャンクの面をまとめて計算する
+        # (この時点で、同じバッチ内の他のチャンクは全部chunk_eventsに
+        #  反映済みなので、境界の判定がバッチ内では正しく行える)
+        for key in newly_discovered_chunks:
+            if key in self.emitted_chunks:
+                continue
+            self.emitted_chunks.add(key)
+            faces = self._emit_chunk_faces(key)
+            new_faces.extend(faces)
+            self._total_faces += len(faces)
+            if self._total_faces >= MAX_MESH_FACES:
+                self.truncated = True
+                break
+
+        self.next_tick = end_tick
+        self.done = self.truncated or (self.next_tick >= self.total_ticks)
+
+        if self.done and not self.truncated:
+            new_faces.extend(self._finalize_edits())
+
+        result = {
+            'new_faces': new_faces,
+            'palette': self.palette_list,  # 毎回パレット全体(小さいので、育っていく分を都度渡す)
+            'entity_frame_updates': entity_frame_updates,
+            'entity_meta': {eid: {'name': v['name'], 'displayName': v['displayName']} for eid, v in self.entities_out.items()},
+            'local_player_entity_id': self.local_player_entity_id,
+            'ticks_per_second': self.ticks_per_second,
+            'processed_tick': self.next_tick,
+            'total_ticks': self.total_ticks,
+            'done': self.done,
+            'truncated': self.truncated,
+        }
+        if self.done:
+            result['bbox'] = [self.minX or 0, self.maxX or 0, self.minY or 0, self.maxY or 0, self.minZ or 0, self.maxZ or 0]
+        return result
 
 
 if __name__ == '__main__':
