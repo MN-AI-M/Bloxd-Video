@@ -431,15 +431,20 @@ function freecamLoop(now) {
       fcPitch = camState.pitch;
     }
   } else {
-    const { forward, right } = fcGetCameraVectors(fcYaw, fcPitch);
-    const d = FC_MOVE_SPEED * dt;
-    const move = (v, s) => { fcPos[0] += v[0]*s; fcPos[1] += v[1]*s; fcPos[2] += v[2]*s; };
-    if (fcKeys['KeyW']) move(forward, d);
-    if (fcKeys['KeyS']) move(forward, -d);
-    if (fcKeys['KeyD']) move(right, d);
-    if (fcKeys['KeyA']) move(right, -d);
-    if (fcKeys['Space']) move([0, 1, 0], d);
-    if (fcKeys['ShiftLeft'] || fcKeys['ShiftRight']) move([0, 1, 0], -d);
+    // マウスキャプチャ中(実際に飛んでる時)だけ移動キーを反映する。
+    // これをしないと、タイムライン側でSpace等のショートカットを使った時に
+    // カメラも一緒に動いてしまう。
+    if (document.pointerLockElement === fcCanvas) {
+      const { forward, right } = fcGetCameraVectors(fcYaw, fcPitch);
+      const d = FC_MOVE_SPEED * dt;
+      const move = (v, s) => { fcPos[0] += v[0]*s; fcPos[1] += v[1]*s; fcPos[2] += v[2]*s; };
+      if (fcKeys['KeyW']) move(forward, d);
+      if (fcKeys['KeyS']) move(forward, -d);
+      if (fcKeys['KeyD']) move(right, d);
+      if (fcKeys['KeyA']) move(right, -d);
+      if (fcKeys['Space']) move([0, 1, 0], d);
+      if (fcKeys['ShiftLeft'] || fcKeys['ShiftRight']) move([0, 1, 0], -d);
+    }
     if (typeof timelineRecordFrame === 'function') timelineRecordFrame();
   }
 

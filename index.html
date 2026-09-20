@@ -86,6 +86,19 @@
             border:1px solid var(--border); font-size:12px; color: var(--muted); }
   #fovValue { min-width:30px; display:inline-block; text-align:right; color: var(--ink); }
 
+  /* --- 撮影中/プレビュー中を、視点から目を離さなくても分かるようにする表示 --- */
+  #vpIndicator { position:absolute; top:12px; left:50%; transform:translateX(-50%); z-index:6;
+                 display:none; align-items:center; gap:8px; padding:8px 16px; border-radius:999px;
+                 font-family: var(--font-display); font-weight:700; font-size:13px; white-space:nowrap;
+                 background:rgba(11,13,18,0.8); backdrop-filter: blur(4px); border:1px solid var(--border); }
+  #vpIndicator.show { display:flex; }
+  #vpIndicator .dot { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+  #vpIndicator.rec { color:#ff6b6b; border-color:#ff6b6b; }
+  #vpIndicator.rec .dot { background:#ff3b3b; animation: vpPulse 1s ease-in-out infinite; }
+  #vpIndicator.prev { color: var(--amethyst); border-color: var(--amethyst); }
+  #vpIndicator.prev .dot { background: var(--amethyst); }
+  @keyframes vpPulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
+
   /* --- タイムラインパネル(マルチトラック) --- */
   #timelinePanel { flex-shrink:0; background: var(--surface); border-top:1px solid var(--border);
                     display:flex; flex-direction:column; height:236px; user-select:none; }
@@ -131,15 +144,31 @@
   .tblock { position:absolute; top:5px; bottom:5px; border-radius:7px; cursor:grab; overflow:hidden;
             border:1.5px solid transparent; }
   .tblock:active { cursor:grabbing; }
-  .tblock.selected { border-color: var(--ink); }
-  .tblock .handle { position:absolute; top:0; bottom:0; width:8px; cursor:ew-resize; }
+  .tblock.selected { border-color: var(--ink); box-shadow: 0 0 0 1px rgba(236,234,227,0.3); }
+  .tblock .handle { position:absolute; top:0; bottom:0; width:11px; cursor:ew-resize; z-index:1; }
   .tblock .handle.left { left:0; } .tblock .handle.right { right:0; }
+  .tblock .handle::after { content:''; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+                            width:3px; height:16px; border-radius:2px; background:rgba(255,255,255,0);
+                            transition: background .1s ease; }
+  .tblock .handle:hover::after, .tblock.selected .handle::after { background:rgba(255,255,255,0.55); }
   .tblock .tblock-label { position:absolute; left:9px; top:5px; font-size:11px; font-weight:700; color:#fff;
                            pointer-events:none; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; right:9px; }
   .tblock .tblock-sub { position:absolute; left:9px; bottom:4px; font-size:9.5px; color:rgba(255,255,255,0.75);
                          pointer-events:none; white-space:nowrap; }
   .tblock.recording-live { animation: tblockPulse 1s ease-in-out infinite; }
   @keyframes tblockPulse { 0%,100% { filter:brightness(1); } 50% { filter:brightness(1.4); } }
+  .tblock.snap-guide { box-shadow: 0 0 0 2px #fff; }
+
+  /* 選択中のブロックに出す、クイック操作のミニツールバー */
+  .tblock-toolbar { position:absolute; bottom:100%; margin-bottom:4px; left:0; display:flex; gap:3px;
+                     background: var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:3px;
+                     z-index:6; }
+  .tblock-toolbar button { width:22px; height:22px; border:none; border-radius:4px; background:transparent;
+                            color: var(--ink); font-size:12px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .tblock-toolbar button:hover { background: var(--border); }
+
+  /* 再生ヘッドやブロック端に吸着した時のガイド線 */
+  .snapLine { position:absolute; top:0; bottom:0; width:1px; background:#fff; opacity:0.6; z-index:5; pointer-events:none; }
 
   /* ============================================================
      ブロック編集パネル(右からスライド、左端をドラッグして幅調整)
@@ -213,7 +242,8 @@
     <div id="loadStatus"></div>
     <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
     <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
-    <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Escでマウス解放</div>
+    <div id="vpIndicator"><span class="dot"></span><span id="vpIndicatorText"></span></div>
+    <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Escでマウス解放<br>(離脱時: Space再生・Delete削除・Ctrl/Cmd+Z元に戻す)</div>
   </div>
 
   <div id="timelinePanel">
@@ -221,6 +251,7 @@
       <button id="playBtn" class="btn btn-primary btn-sm">▶ 再生</button>
       <div id="timecode">0:00 / 0:00</div>
       <select id="entitySelect"></select>
+      <button id="undoBtn" class="btn btn-icon btn-sm" title="元に戻す (Ctrl/Cmd+Z)" disabled>↺</button>
       <div id="transportSpacer"></div>
       <div id="frameInfo">-</div>
       <div id="zoomBox">

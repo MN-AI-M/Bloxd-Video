@@ -15,6 +15,18 @@
 //     type: 'freeRecord', data: {...typeごとの中身...} }
 // カメラの場合、data.cameraPath は Map<tick, {pos:[x,y,z], yaw, pitch}>
 // (tickは絶対値。worldOriginX,Y,Zからの相対座標で保存する)。
+//
+// v2: 操作感の見直し。
+//  - 🎥トラックの「＋」は、ブロックを作るだけでなく即座に記録も始める
+//    (今まで「＋→パネルを開く→記録ボタン」と3手かかっていたのを1手に)
+//  - 撮影中/プレビュー中は3Dビューの中央上にも表示する(タイムラインを
+//    見なくても分かるように)
+//  - ブロックの移動・伸縮は、他のブロックの端や再生ヘッドにスナップする
+//  - Ctrl/Cmd+Z で元に戻せる(ブロックの追加・削除・移動・伸縮を記録)
+//  - Delete/Backspaceで選択中のブロックを削除、Escでパネルを閉じる、
+//    Ctrl/Cmd+スクロールでズーム(これらは自由カメラを操作してない時だけ
+//    有効にしてあり、WASD等とはぶつからない)
+//  - 選択したブロックにミニツールバー(編集・複製・削除)を出す
 // ============================================================
 
 const TRACKS = [
@@ -30,9 +42,9 @@ let selectedBlockId = null;
 let timelinePxPerTick = 3;
 let activeRecordingBlockId = null;
 
-const TRACK_ROW_HEIGHT = 46;
 const LABEL_WIDTH = 96;
-const DEFAULT_BLOCK_TICKS = 90; // 新規カメラブロックの初期の長さ(3秒ぶん、30fps換算)
+const DEFAULT_BLOCK_TICKS = 90;   // 新規カメラブロックの初期の長さ(3秒ぶん、30fps換算)
+const SNAP_PX = 8;                // この距離(画素)以内なら吸着する
 
 
 // ============================================================
@@ -56,7 +68,7 @@ function initTimelineUI() {
     addBtn.className = 'addBtn';
     addBtn.innerText = '＋';
     addBtn.disabled = !track.enabled;
-    addBtn.title = track.enabled ? `${track.label}ブロックを追加` : '近日公開';
+    addBtn.title = track.enabled ? (track.label + 'の記録を、再生ヘッドの位置からすぐ始めます') : '近日公開';
     if (track.enabled) {
       addBtn.style.background = track.color;
       addBtn.style.color = track.ink;
@@ -74,7 +86,7 @@ function initTimelineUI() {
       soon.innerText = '近日公開';
       lane.appendChild(soon);
     }
-    lane.addEventListener('mousedown', (e) => onLaneMouseDown(e, track.id, lane));
+    lane.addEventListener('mousedown', (e) => onLaneMouseDown(e));
 
     row.appendChild(label);
     row.appendChild(lane);
@@ -83,15 +95,26 @@ function initTimelineUI() {
 
   document.getElementById('zoomInBtn').onclick = () => setTimelineZoom(timelinePxPerTick * 1.5);
   document.getElementById('zoomOutBtn').onclick = () => setTimelineZoom(timelinePxPerTick / 1.5);
+  document.getElementById('undoBtn').onclick = performUndo;
 
-  document.getElementById('rulerTicks').parentElement.addEventListener('mousedown', (e) => {
-    if (e.target.id === 'rulerTicks') onLaneMouseDown(e, null, null, true);
+  document.getElementById('rulerRow').addEventListener('mousedown', (e) => {
+    if (e.target.id === 'rulerTicks') onLaneMouseDown(e);
   });
+
+  document.getElementById('tracksScroll').addEventListener('wheel', (e) => {
+    if (!e.ctrlKey && !e.metaKey) return; // 普通のスクロールは邪魔しない。Ctrl/Cmd+スクロールだけズーム
+    e.preventDefault();
+    const rect = document.getElementById('tracksInner').getBoundingClientRect();
+    const tickUnderCursor = pxToTick(e.clientX - rect.left - LABEL_WIDTH);
+    setTimelineZoom(timelinePxPerTick * (e.deltaY < 0 ? 1.15 : 1 / 1.15), tickUnderCursor, e.clientX - rect.left);
+  }, { passive: false });
 
   setupEditPanelResizer();
   document.getElementById('editPanelClose').onclick = closeEditPanel;
+  setupTimelineKeyboardShortcuts();
 
   renderTimeline();
+  updateUndoButton();
 }
 
 function totalTimelineTicks() {
@@ -103,9 +126,16 @@ function totalTimelineTicks() {
 function tickToPx(tick) { return tick * timelinePxPerTick; }
 function pxToTick(px) { return Math.max(0, Math.round(px / timelinePxPerTick)); }
 
-function setTimelineZoom(newPxPerTick) {
+function setTimelineZoom(newPxPerTick, anchorTick, anchorPx) {
+  const old = timelinePxPerTick;
   timelinePxPerTick = Math.max(0.3, Math.min(20, newPxPerTick));
   renderTimeline();
+  // アンカー(だいたいマウス位置)が画面上で動かないよう、スクロール位置を補正する
+  if (anchorTick !== undefined && old !== timelinePxPerTick) {
+    const scroller = document.getElementById('tracksScroll');
+    const newPx = tickToPx(anchorTick);
+    scroller.scrollLeft = Math.max(0, newPx - anchorPx + LABEL_WIDTH);
+  }
 }
 
 
@@ -127,7 +157,6 @@ function renderRuler() {
 
   const tps = (allTimelines && allTimelines.ticksPerSecond) || 30;
   const totalSeconds = totalTicks / tps;
-  // だいたい80px間隔になるよう、秒の目盛り間隔を選ぶ
   const candidateSteps = [1, 2, 5, 10, 15, 30, 60, 120, 300];
   const pxPerSecond = timelinePxPerTick * tps;
   let step = candidateSteps.find(s => s * pxPerSecond >= 80) || candidateSteps[candidateSteps.length - 1];
@@ -147,7 +176,7 @@ function renderRuler() {
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
-  return `${m}:${String(s).padStart(2, '0')}`;
+  return m + ':' + String(s).padStart(2, '0');
 }
 
 function updateTimecode() {
@@ -156,7 +185,7 @@ function updateTimecode() {
   const tps = allTimelines.ticksPerSecond || 30;
   const cur = (timeline.frames[curTick] ? timeline.frames[curTick].tick : curTick) / tps;
   const total = totalTimelineTicks() / tps;
-  el.innerText = `${formatTime(cur)} / ${formatTime(total)}`;
+  el.innerText = formatTime(cur) + ' / ' + formatTime(total);
 }
 
 function updatePlayheadPosition() {
@@ -164,14 +193,13 @@ function updatePlayheadPosition() {
   if (!ph) return;
   ph.style.left = (LABEL_WIDTH + tickToPx(curTick)) + 'px';
   updateTimecode();
+  updateViewportIndicator();
 }
 
 function renderBlocks() {
   for (const track of TRACKS) {
-    const lane = document.querySelector(`.track-lane[data-track="${track.id}"]`);
+    const lane = document.querySelector('.track-lane[data-track="' + track.id + '"]');
     if (!lane) continue;
-    // 既存のブロック要素を全部消してから作り直す(ブロック数はごく少数の想定なので、
-    // 差分更新の複雑さより単純な全再描画を優先した)
     lane.querySelectorAll('.tblock').forEach(el => el.remove());
     const blocks = timelineBlocks.filter(b => b.track === track.id);
     for (const block of blocks) {
@@ -182,7 +210,8 @@ function renderBlocks() {
 
 function buildBlockElement(block, track) {
   const el = document.createElement('div');
-  el.className = 'tblock' + (block.id === selectedBlockId ? ' selected' : '') +
+  const isSelected = block.id === selectedBlockId;
+  el.className = 'tblock' + (isSelected ? ' selected' : '') +
                   (block.id === activeRecordingBlockId ? ' recording-live' : '');
   el.style.left = tickToPx(block.startTick) + 'px';
   el.style.width = Math.max(6, tickToPx(block.endTick - block.startTick)) + 'px';
@@ -216,7 +245,27 @@ function buildBlockElement(block, track) {
   el.addEventListener('mousedown', (e) => { if (e.target === el || e.target === label || e.target === sub) startBlockDrag(e, block, 'move'); });
   el.addEventListener('dblclick', (e) => { e.stopPropagation(); openEditPanel(block); });
 
+  if (isSelected) el.appendChild(buildBlockToolbar(block));
+
   return el;
+}
+
+// 選択中のブロックの上に出す、編集・複製・削除のミニツールバー。
+// ダブルクリックを知らなくても、ここから同じ操作にすぐ辿り着けるようにする。
+function buildBlockToolbar(block) {
+  const bar = document.createElement('div');
+  bar.className = 'tblock-toolbar';
+  const mk = (icon, title, fn) => {
+    const b = document.createElement('button');
+    b.innerText = icon; b.title = title;
+    b.onclick = (e) => { e.stopPropagation(); fn(); };
+    b.onmousedown = (e) => e.stopPropagation();
+    return b;
+  };
+  bar.appendChild(mk('✎', '編集パネルを開く', () => openEditPanel(block)));
+  bar.appendChild(mk('⧉', '複製', () => duplicateBlock(block.id)));
+  bar.appendChild(mk('🗑', '削除', () => { if (confirm('このブロックを削除しますか?')) deleteBlock(block.id); }));
+  return bar;
 }
 
 function blockDisplayName(block) {
@@ -229,14 +278,16 @@ function blockDisplayName(block) {
 
 
 // ============================================================
-// ブロックの追加・削除
+// ブロックの追加・複製・削除
 // ============================================================
 
+// 「＋」を押した瞬間に、ブロックを作って記録も始める(手数を減らすため)。
 function addBlockOnTrack(trackId) {
   const track = TRACKS.find(t => t.id === trackId);
   if (!track || !track.enabled) return;
+  pushUndo();
   const start = curTick;
-  const end = Math.min(totalTimelineTicks(), start + DEFAULT_BLOCK_TICKS);
+  const end = Math.min(totalTimelineTicks() + DEFAULT_BLOCK_TICKS, start + DEFAULT_BLOCK_TICKS);
   const block = {
     id: nextBlockId++,
     track: trackId,
@@ -246,22 +297,70 @@ function addBlockOnTrack(trackId) {
     data: { cameraPath: new Map() },
   };
   timelineBlocks.push(block);
+  selectedBlockId = block.id;
   renderTimeline();
-  openEditPanel(block);
+  if (trackId === 'camera') startRecordingBlock(block.id);
+}
+
+function duplicateBlock(id) {
+  const block = timelineBlocks.find(b => b.id === id);
+  if (!block) return;
+  pushUndo();
+  const len = block.endTick - block.startTick;
+  const shifted = new Map();
+  for (const [t, v] of block.data.cameraPath) shifted.set(t + len, v);
+  const newBlock = {
+    id: nextBlockId++,
+    track: block.track,
+    startTick: block.endTick,
+    endTick: block.endTick + len,
+    type: block.type,
+    data: { cameraPath: shifted },
+  };
+  timelineBlocks.push(newBlock);
+  selectedBlockId = newBlock.id;
+  renderTimeline();
+  updateExportAvailability();
 }
 
 function deleteBlock(id) {
+  pushUndo();
   if (activeRecordingBlockId === id) stopRecordingBlock();
   timelineBlocks = timelineBlocks.filter(b => b.id !== id);
   if (selectedBlockId === id) selectedBlockId = null;
   closeEditPanel();
   renderTimeline();
-  if (typeof updateExportAvailability === 'function') updateExportAvailability();
+  updateExportAvailability();
+}
+
+// 再生ヘッドの位置でブロックを2つに割る(カメラワークのMapもそこで分ける)
+function splitBlockAtPlayhead(id) {
+  const block = timelineBlocks.find(b => b.id === id);
+  if (!block || curTick <= block.startTick || curTick >= block.endTick) return;
+  pushUndo();
+  const rightPath = new Map();
+  const leftPath = new Map();
+  for (const [t, v] of block.data.cameraPath) {
+    if (t < curTick) leftPath.set(t, v); else rightPath.set(t, v);
+  }
+  const rightBlock = {
+    id: nextBlockId++,
+    track: block.track,
+    startTick: curTick,
+    endTick: block.endTick,
+    type: block.type,
+    data: { cameraPath: rightPath },
+  };
+  block.endTick = curTick;
+  block.data.cameraPath = leftPath;
+  timelineBlocks.push(rightBlock);
+  renderTimeline();
+  updateExportAvailability();
 }
 
 
 // ============================================================
-// ドラッグ(移動・伸縮)・再生ヘッドのシーク
+// ドラッグ(移動・伸縮。他ブロックの端/再生ヘッドにスナップする)
 // ============================================================
 
 let dragState = null;
@@ -270,48 +369,104 @@ function startBlockDrag(e, block, mode) {
   e.preventDefault();
   selectedBlockId = block.id;
   renderBlocks();
+  pushUndo();
   dragState = {
     mode, block,
     startX: e.clientX,
     origStart: block.startTick,
     origEnd: block.endTick,
+    moved: false,
   };
   document.addEventListener('mousemove', onBlockDragMove);
   document.addEventListener('mouseup', onBlockDragEnd);
 }
 
+// ドラッグ中のブロック以外の、全ブロックの端+再生ヘッドを吸着候補にする
+function snapCandidates(excludeId) {
+  const points = [curTick];
+  for (const b of timelineBlocks) {
+    if (b.id === excludeId) continue;
+    points.push(b.startTick, b.endTick);
+  }
+  return points;
+}
+
+function trySnap(tick, candidates) {
+  const thresholdTicks = SNAP_PX / timelinePxPerTick;
+  let best = null, bestDist = thresholdTicks;
+  for (const c of candidates) {
+    const d = Math.abs(c - tick);
+    if (d < bestDist) { bestDist = d; best = c; }
+  }
+  return best !== null ? best : tick;
+}
+
 function onBlockDragMove(e) {
   if (!dragState) return;
+  dragState.moved = true;
   const dTick = Math.round((e.clientX - dragState.startX) / timelinePxPerTick);
   const { block, mode, origStart, origEnd } = dragState;
   const minLen = 3;
+  const candidates = snapCandidates(block.id);
+  let snappedTick = null;
+
   if (mode === 'move') {
     let newStart = origStart + dTick;
     let newEnd = origEnd + dTick;
+    const snappedStart = trySnap(newStart, candidates);
+    const snappedEnd = trySnap(newEnd, candidates);
+    if (snappedStart !== newStart) { newEnd += (snappedStart - newStart); newStart = snappedStart; snappedTick = newStart; }
+    else if (snappedEnd !== newEnd) { newStart += (snappedEnd - newEnd); newEnd = snappedEnd; snappedTick = newEnd; }
     if (newStart < 0) { newEnd -= newStart; newStart = 0; }
     block.startTick = newStart;
     block.endTick = newEnd;
   } else if (mode === 'resize-left') {
-    block.startTick = Math.max(0, Math.min(origEnd - minLen, origStart + dTick));
+    let newStart = Math.max(0, Math.min(origEnd - minLen, origStart + dTick));
+    newStart = trySnap(newStart, candidates);
+    if (candidates.includes(newStart)) snappedTick = newStart;
+    block.startTick = Math.min(origEnd - minLen, Math.max(0, newStart));
   } else if (mode === 'resize-right') {
-    block.endTick = Math.max(origStart + minLen, origEnd + dTick);
+    let newEnd = Math.max(origStart + minLen, origEnd + dTick);
+    newEnd = trySnap(newEnd, candidates);
+    if (candidates.includes(newEnd)) snappedTick = newEnd;
+    block.endTick = Math.max(origStart + minLen, newEnd);
   }
+
+  showSnapGuide(snappedTick);
   renderBlocks();
   if (document.getElementById('editPanel').classList.contains('open') && selectedBlockId === block.id) {
     refreshEditPanelFields(block);
   }
 }
 
+function showSnapGuide(tick) {
+  let guide = document.getElementById('snapLineEl');
+  if (tick === null) {
+    if (guide) guide.remove();
+    return;
+  }
+  if (!guide) {
+    guide = document.createElement('div');
+    guide.id = 'snapLineEl';
+    guide.className = 'snapLine';
+    document.getElementById('tracksInner').appendChild(guide);
+  }
+  guide.style.left = (LABEL_WIDTH + tickToPx(tick)) + 'px';
+}
+
 function onBlockDragEnd() {
+  const wasNoOp = dragState && !dragState.moved;
   dragState = null;
+  showSnapGuide(null);
   document.removeEventListener('mousemove', onBlockDragMove);
   document.removeEventListener('mouseup', onBlockDragEnd);
+  if (wasNoOp) undoStack.pop(); // クリックしただけで動かしてない場合は、余分なundo履歴を残さない
   renderTimeline();
-  if (typeof updateExportAvailability === 'function') updateExportAvailability();
+  updateExportAvailability();
 }
 
 // レーン/ルーラーの空いてる場所をクリック・ドラッグして再生ヘッドを動かす
-function onLaneMouseDown(e, trackId, lane, isRuler) {
+function onLaneMouseDown(e) {
   if (e.target.closest('.tblock')) return; // ブロックの上ならブロック側の処理に任せる
   seekFromClientX(e.clientX);
   const move = (ev) => seekFromClientX(ev.clientX);
@@ -359,7 +514,7 @@ function refreshEditPanelFields(block) {
 
   const rangeRow = document.createElement('div');
   rangeRow.className = 'fieldRow';
-  rangeRow.innerHTML = `<label>区間</label><div class="value">${formatTime(block.startTick/tps)} 〜 ${formatTime(block.endTick/tps)}(${((block.endTick-block.startTick)/tps).toFixed(1)}秒)</div>`;
+  rangeRow.innerHTML = '<label>区間</label><div class="value">' + formatTime(block.startTick/tps) + ' 〜 ' + formatTime(block.endTick/tps) + '(' + ((block.endTick-block.startTick)/tps).toFixed(1) + '秒)</div>';
   body.appendChild(rangeRow);
 
   if (block.track === 'camera') {
@@ -388,7 +543,21 @@ function refreshEditPanelFields(block) {
       previewOneBtn.onclick = () => previewSingleBlock(block);
       body.appendChild(previewOneBtn);
     }
+
+    if (curTick > block.startTick && curTick < block.endTick) {
+      const splitBtn = document.createElement('button');
+      splitBtn.className = 'btn btn-ghost';
+      splitBtn.innerText = '✂ 再生ヘッドの位置で分割';
+      splitBtn.onclick = () => { splitBlockAtPlayhead(block.id); closeEditPanel(); };
+      body.appendChild(splitBtn);
+    }
   }
+
+  const duplicateBtn = document.createElement('button');
+  duplicateBtn.className = 'btn btn-ghost';
+  duplicateBtn.innerText = '⧉ 複製';
+  duplicateBtn.onclick = () => duplicateBlock(block.id);
+  body.appendChild(duplicateBtn);
 
   const deleteBtn = document.createElement('button');
   deleteBtn.id = 'deleteBlockBtn';
@@ -434,6 +603,7 @@ function startRecordingBlock(blockId) {
   curTick = block.startTick;
   if (!isPlayingTimeline()) startTimelinePlayback();
   renderBlocks();
+  updateViewportIndicator();
 }
 
 function stopRecordingBlock() {
@@ -442,7 +612,8 @@ function stopRecordingBlock() {
   activeRecordingBlockId = null;
   stopTimelinePlayback();
   renderBlocks();
-  if (typeof updateExportAvailability === 'function') updateExportAvailability();
+  updateExportAvailability();
+  updateViewportIndicator();
   return block;
 }
 
@@ -463,14 +634,43 @@ function timelineRecordFrame() {
   block.data.cameraPath.set(curTick, { pos: [fcPos[0], fcPos[1], fcPos[2]], yaw: fcYaw, pitch: fcPitch });
 }
 
+function previewSingleBlock(block) {
+  curTick = block.startTick;
+  fcSetPreviewMode(true);
+  if (!isPlayingTimeline()) startTimelinePlayback();
+}
+
+
+// ============================================================
+// 3Dビュー上の記録中/プレビュー中インジケータ
+// ============================================================
+// 飛んでる最中はタイムラインを見てる余裕が無いので、今の状態を
+// ビューの中央上にも常に出しておく。
+
+function updateViewportIndicator() {
+  const el = document.getElementById('vpIndicator');
+  const textEl = document.getElementById('vpIndicatorText');
+  if (!el || !textEl) return;
+
+  if (activeRecordingBlockId !== null) {
+    const block = timelineBlocks.find(b => b.id === activeRecordingBlockId);
+    const tps = (allTimelines && allTimelines.ticksPerSecond) || 30;
+    const elapsed = block ? Math.max(0, (curTick - block.startTick) / tps) : 0;
+    el.className = 'show rec';
+    textEl.innerText = 'REC ' + elapsed.toFixed(1) + '秒';
+  } else if (fcPreviewMode) {
+    el.className = 'show prev';
+    textEl.innerText = 'プレビュー再生中';
+  } else {
+    el.className = '';
+  }
+}
+
 
 // ============================================================
 // 全ブロック横断のカメラ位置検索(プレビュー・書き出しで使う)
 // ============================================================
 
-// 指定tickをカバーしてるカメラブロックを探し、その中で記録済みの
-// 位置を補間して返す。無ければ、直前に有効だったブロックの最後の位置で
-// 静止させる(何もカメラが無い空白区間を作らないため)。
 function getCameraStateAtTick(tick) {
   const camBlocks = timelineBlocks
     .filter(b => b.track === 'camera' && b.data.cameraPath && b.data.cameraPath.size > 0)
@@ -480,7 +680,6 @@ function getCameraStateAtTick(tick) {
   let covering = camBlocks.find(b => tick >= b.startTick && tick <= b.endTick);
   let sourceBlock = covering;
   if (!sourceBlock) {
-    // カバーしてるブロックが無ければ、直前に終わったブロックを使う(無ければ最初のブロック)
     const before = camBlocks.filter(b => b.endTick <= tick).sort((a, b) => b.endTick - a.endTick)[0];
     sourceBlock = before || camBlocks[0];
   }
@@ -524,8 +723,72 @@ function overallCameraRange() {
   };
 }
 
-function previewSingleBlock(block) {
-  curTick = block.startTick;
-  fcSetPreviewMode(true);
-  if (!isPlayingTimeline()) startTimelinePlayback();
+
+// ============================================================
+// 元に戻す(Undo)
+// ============================================================
+// ブロックを動かす/伸縮する/追加する/消す、といった操作の直前に
+// pushUndo()でスナップショットを1つ積んでおく。cameraPathはMapなので
+// structuredCloneでまとめて複製する(モダンブラウザなら標準で使える)。
+
+let undoStack = [];
+const UNDO_LIMIT = 30;
+
+function pushUndo() {
+  try {
+    undoStack.push(structuredClone(timelineBlocks));
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  } catch (e) {
+    // structuredCloneが使えない古い環境向けの保険。Undoだけ諦めて処理は続行する
+    console.warn('元に戻す用のスナップショットを作れませんでした:', e);
+  }
+  updateUndoButton();
+}
+
+function performUndo() {
+  if (undoStack.length === 0) return;
+  if (activeRecordingBlockId !== null) stopRecordingBlock();
+  timelineBlocks = undoStack.pop();
+  const maxId = timelineBlocks.reduce((m, b) => Math.max(m, b.id), 0);
+  nextBlockId = Math.max(nextBlockId, maxId + 1);
+  selectedBlockId = null;
+  closeEditPanel();
+  renderTimeline();
+  updateExportAvailability();
+  updateUndoButton();
+}
+
+function updateUndoButton() {
+  const btn = document.getElementById('undoBtn');
+  if (btn) btn.disabled = undoStack.length === 0;
+}
+
+
+// ============================================================
+// キーボードショートカット
+// ============================================================
+// マウスキャプチャ中(実際に自由カメラを操作してる間)は、WASD/Spaceと
+// ぶつからないよう一切反応しない。
+
+function setupTimelineKeyboardShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    if (document.pointerLockElement === fcCanvas) return; // 飛んでる最中は無効
+    const tag = document.activeElement && document.activeElement.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      performUndo();
+    } else if (e.code === 'Space') {
+      e.preventDefault();
+      if (isPlayingTimeline()) stopTimelinePlayback(); else startTimelinePlayback();
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (selectedBlockId !== null) {
+        e.preventDefault();
+        deleteBlock(selectedBlockId);
+      }
+    } else if (e.key === 'Escape') {
+      if (document.getElementById('editPanel').classList.contains('open')) closeEditPanel();
+    }
+  });
 }
