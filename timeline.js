@@ -595,7 +595,7 @@ function setupEditPanelResizer() {
     const startWidth = panel.getBoundingClientRect().width;
     const move = (ev) => {
       const newWidth = startWidth - (ev.clientX - startX);
-      panel.style.width = Math.max(280, Math.min(720, newWidth)) + 'px';
+      panel.style.width = Math.max(340, Math.min(820, newWidth)) + 'px';
     };
     const up = () => {
       resizer.classList.remove('dragging');
@@ -689,9 +689,16 @@ function updateViewportIndicator() {
 // 全ブロック横断のカメラ位置検索(プレビュー・書き出しで使う)
 // ============================================================
 
+// カメラブロックが「使える中身」を持ってるかどうか(モードによって判定が違う)
+function blockHasCameraContent(b) {
+  if (b.track !== 'camera') return false;
+  if (b.data.mode === 'static') return !!b.data.staticState;
+  return b.data.cameraPath && b.data.cameraPath.size > 0;
+}
+
 function getCameraStateAtTick(tick) {
   const camBlocks = timelineBlocks
-    .filter(b => b.track === 'camera' && b.data.cameraPath && b.data.cameraPath.size > 0)
+    .filter(blockHasCameraContent)
     .sort((a, b) => a.startTick - b.startTick);
   if (camBlocks.length === 0) return null;
 
@@ -702,9 +709,36 @@ function getCameraStateAtTick(tick) {
     sourceBlock = before || camBlocks[0];
   }
 
-  const sortedTicks = Array.from(sourceBlock.data.cameraPath.keys()).sort((a, b) => a - b);
-  const clamped = Math.max(sortedTicks[0], Math.min(sortedTicks[sortedTicks.length - 1], tick));
-  return interpolateCameraPath(sourceBlock.data.cameraPath, sortedTicks, clamped);
+  let state;
+  if (sourceBlock.data.mode === 'static') {
+    const s = sourceBlock.data.staticState;
+    state = { pos: [s.pos[0], s.pos[1], s.pos[2]], yaw: s.yaw, pitch: s.pitch };
+  } else {
+    const sortedTicks = Array.from(sourceBlock.data.cameraPath.keys()).sort((a, b) => a - b);
+    const clamped = Math.max(sortedTicks[0], Math.min(sortedTicks[sortedTicks.length - 1], tick));
+    state = interpolateCameraPath(sourceBlock.data.cameraPath, sortedTicks, clamped);
+  }
+
+  // 「プレイヤーを見続ける」が有効なら、位置はそのままに向きだけ
+  // 今のプレイヤー位置に向くよう上書きする(固定ショット+この設定で、
+  // 定点から追いかけるカメラになる)
+  if (sourceBlock.data.lookAtPlayer && timeline && timeline.frames[tick]) {
+    const aim = computeLookAt(state.pos, timeline.frames[tick].position);
+    state.yaw = aim.yaw;
+    state.pitch = aim.pitch;
+  }
+
+  state.fov = sourceBlock.data.fov || 70;
+  return state;
+}
+
+// fromPosLocal: worldOrigin基準の相対座標。targetPosWorld: ワールド座標(タイムラインのposition)。
+function computeLookAt(fromPosLocal, targetPosWorld) {
+  const dx = (targetPosWorld[0] - worldOriginX) - fromPosLocal[0];
+  const dy = (targetPosWorld[1] - worldOriginY) - fromPosLocal[1];
+  const dz = (targetPosWorld[2] - worldOriginZ) - fromPosLocal[2];
+  const horiz = Math.sqrt(dx * dx + dz * dz);
+  return { yaw: Math.atan2(dx, dz), pitch: Math.atan2(dy, horiz) };
 }
 
 function interpolateCameraPath(pathMap, sortedTicks, tick) {
@@ -729,7 +763,7 @@ function interpolateCameraPath(pathMap, sortedTicks, tick) {
 }
 
 function hasAnyRecordedCamera() {
-  return timelineBlocks.some(b => b.track === 'camera' && b.data.cameraPath && b.data.cameraPath.size > 0);
+  return timelineBlocks.some(blockHasCameraContent);
 }
 
 function overallCameraRange() {

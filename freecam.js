@@ -381,6 +381,22 @@ function renderFreecam() {
   fcGl.viewport(0, 0, fcCanvas.width, fcCanvas.height);
   fcGl.clearColor(0.4, 0.63, 0.9, 1); // 空っぽい水色(単色描画より馴染むように)
   fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
+
+  const aspect = fcCanvas.width / Math.max(1, fcCanvas.height);
+  const proj = fcMat4Perspective(fcFovDeg * Math.PI / 180, aspect, 0.1, 3000);
+  const { forward } = fcGetCameraVectors(fcYaw, fcPitch);
+  const center = [fcPos[0] + forward[0], fcPos[1] + forward[1], fcPos[2] + forward[2]];
+  const view = fcMat4LookAt(fcPos, center, [0, 1, 0]);
+
+  drawTerrainWithMatrices(view, proj, 0, 0, fcCanvas.width, fcCanvas.height);
+}
+
+// 地形の描画本体。view/proj行列とビューポート範囲を渡せば、通常の飛行画面
+// からも、global-setting画面のシーンビュー/プレビュー小窓からも同じ
+// 呼び方で使い回せる(地形バッファ・テクスチャアトラスは1つだけ持っていて、
+// 使い回している)。
+function drawTerrainWithMatrices(viewMatrix, projMatrix, vx, vy, vw, vh) {
+  fcGl.viewport(vx, vy, vw, vh);
   if (fcVertexCount === 0 || !fcTexture) return;
 
   fcGl.useProgram(fcProgram);
@@ -395,14 +411,8 @@ function renderFreecam() {
   fcGl.enableVertexAttribArray(fcARevealTickLoc);
   fcGl.vertexAttribPointer(fcARevealTickLoc, 1, fcGl.FLOAT, false, stride, 24);
 
-  const aspect = fcCanvas.width / Math.max(1, fcCanvas.height);
-  const proj = fcMat4Perspective(fcFovDeg * Math.PI / 180, aspect, 0.1, 3000);
-  const { forward } = fcGetCameraVectors(fcYaw, fcPitch);
-  const center = [fcPos[0] + forward[0], fcPos[1] + forward[1], fcPos[2] + forward[2]];
-  const view = fcMat4LookAt(fcPos, center, [0, 1, 0]);
-
-  fcGl.uniformMatrix4fv(fcUProjLoc, false, proj);
-  fcGl.uniformMatrix4fv(fcUViewLoc, false, view);
+  fcGl.uniformMatrix4fv(fcUProjLoc, false, projMatrix);
+  fcGl.uniformMatrix4fv(fcUViewLoc, false, viewMatrix);
 
   let curTickVal = Infinity;
   if (timeline && timeline.frames.length && timeline.frames[curTick]) {
@@ -421,6 +431,15 @@ function freecamLoop(now) {
   if (!fcActive) return;
   const dt = fcLastFrameTime ? Math.min(0.1, (now - fcLastFrameTime) / 1000) : 0;
   fcLastFrameTime = now;
+
+  if (gsMode) {
+    // global-setting画面(オービット視点のシーンエディタ)。
+    // WASD/プレビュー自動操縦とは無関係な、独立した描画・操作系統。
+    renderGlobalSettingFrame();
+    if (typeof updatePlayheadPosition === 'function') updatePlayheadPosition();
+    fcAnimId = requestAnimationFrame(freecamLoop);
+    return;
+  }
 
   if (fcPreviewMode) {
     // カメラはタイムラインの記録済みブロックに沿って自動で動く(手動操作は無視する)
@@ -489,6 +508,9 @@ async function initFreecamOnce() {
   fcActive = true;
   fcKeys = {};
   resizeFreecamCanvas();
+
+  if (typeof initEntities3D === 'function') initEntities3D(fcGl);
+  if (typeof setupGlobalSettingControls === 'function') setupGlobalSettingControls();
 
   // 既にジオメトリが継ぎ足され始めてる場合、今ある分をすぐアップロードしておく
   if (fcVertexData.length > 0) {
@@ -612,5 +634,135 @@ function fcFinishExport() {
   stopTimelinePlayback();
   if (fcMediaRecorder && fcMediaRecorder.state !== 'inactive') {
     fcMediaRecorder.stop();
+  }
+}
+
+
+// ============================================================
+// global-setting画面(Mine-imator風のシーンエディタ)
+// ============================================================
+// 通常の自由カメラ(WASDで飛ぶ、その場で見た映像がそのまま記録される)
+// とは別に、こちらは「外から見下ろして、カメラの位置そのものを配置・
+// 調整する」ための画面。同じcanvas・同じ地形バッファ・同じテクスチャを
+// 使い回し、視点の操作方法とビューポートの使い方だけを切り替える形に
+// してある(2つ目のWebGLコンテキストを作ると、地形データを丸ごと
+// 複製することになりメモリを圧迫するため)。
+//
+// - ドラッグでオービット(注視点を中心に回転)、スクロールでズーム
+// - カメラギズモ(緑の小さいカメラ型アイコン)をクリックで選択、
+//   ダブルクリックでそのブロックの編集パネルを開く
+// - 画面右下に、選択中のカメラが実際に見る映像を小窓(PiP)で表示する
+
+let gsMode = false;
+let gsTarget = [0, 20, 0]; // オービットの注視点(worldOrigin基準のローカル座標)
+let gsDistance = 60;
+let gsYaw = 0, gsPitch = -0.5;
+let gsDragging = false, gsLastX = 0, gsLastY = 0;
+
+function toggleGlobalSetting() {
+  gsMode = !gsMode;
+  if (gsMode) {
+    if (document.pointerLockElement === fcCanvas) document.exitPointerLock();
+    gsTarget = [fcPos[0], fcPos[1], fcPos[2]];
+    if (typeof initEntities3D === 'function') initEntities3D(fcGl);
+  }
+  return gsMode;
+}
+
+function gsGetEyePosition() {
+  const cp = Math.cos(gsPitch), sp = Math.sin(gsPitch);
+  const cy = Math.cos(gsYaw), sy = Math.sin(gsYaw);
+  return [
+    gsTarget[0] + gsDistance * cp * sy,
+    gsTarget[1] + gsDistance * sp,
+    gsTarget[2] + gsDistance * cp * cy,
+  ];
+}
+
+function gsGetSceneMatrices() {
+  const eye = gsGetEyePosition();
+  const aspect = fcCanvas.width / Math.max(1, fcCanvas.height);
+  const proj = fcMat4Perspective(60 * Math.PI / 180, aspect, 0.1, 3000);
+  const view = fcMat4LookAt(eye, gsTarget, [0, 1, 0]);
+  return { view, proj, eye };
+}
+
+function setupGlobalSettingControls() {
+  fcCanvas.addEventListener('mousedown', (e) => {
+    if (!gsMode) return;
+    gsDragging = true; gsLastX = e.clientX; gsLastY = e.clientY;
+  });
+  document.addEventListener('mouseup', () => { gsDragging = false; });
+  document.addEventListener('mousemove', (e) => {
+    if (!gsMode || !gsDragging) return;
+    const dx = e.clientX - gsLastX, dy = e.clientY - gsLastY;
+    gsLastX = e.clientX; gsLastY = e.clientY;
+    gsYaw -= dx * 0.006;
+    gsPitch = Math.max(-1.5, Math.min(1.5, gsPitch - dy * 0.006));
+  });
+  fcCanvas.addEventListener('wheel', (e) => {
+    if (!gsMode) return;
+    e.preventDefault();
+    gsDistance = Math.max(3, Math.min(500, gsDistance * (e.deltaY < 0 ? 0.9 : 1.1)));
+  }, { passive: false });
+
+  fcCanvas.addEventListener('click', (e) => {
+    if (!gsMode || gsJustDragged) return;
+    const rect = fcCanvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+    const { view, proj } = gsGetSceneMatrices();
+    const picked = (typeof pickCameraGizmo === 'function') ? pickCameraGizmo(cx, cy, view, proj, fcCanvas.width, fcCanvas.height) : null;
+    if (picked && typeof renderBlocks === 'function') {
+      selectedBlockId = picked.id;
+      renderBlocks();
+    }
+  });
+  fcCanvas.addEventListener('dblclick', (e) => {
+    if (!gsMode) return;
+    const rect = fcCanvas.getBoundingClientRect();
+    const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+    const { view, proj } = gsGetSceneMatrices();
+    const picked = (typeof pickCameraGizmo === 'function') ? pickCameraGizmo(cx, cy, view, proj, fcCanvas.width, fcCanvas.height) : null;
+    if (picked && typeof openEditPanel === 'function') openEditPanel(picked);
+  });
+}
+let gsJustDragged = false; // ドラッグ操作の直後にクリック判定が誤発火しないようにする簡易フラグ(今は未使用の保険)
+
+function renderGlobalSettingFrame() {
+  if (!fcGl) return;
+  fcGl.viewport(0, 0, fcCanvas.width, fcCanvas.height);
+  fcGl.clearColor(0.05, 0.06, 0.08, 1);
+  fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
+
+  const { view, proj } = gsGetSceneMatrices();
+
+  drawTerrainWithMatrices(view, proj, 0, 0, fcCanvas.width, fcCanvas.height);
+  if (typeof renderHumanoids === 'function') renderHumanoids(fcGl, view, proj, curTick);
+  if (typeof renderCameraGizmos === 'function') {
+    renderCameraGizmos(fcGl, view, proj, typeof selectedBlockId !== 'undefined' ? selectedBlockId : null);
+  }
+
+  // 右下に、選択中/現在有効なカメラが実際に見る映像を小窓で出す
+  const camState = (typeof getCameraStateAtTick === 'function') ? getCameraStateAtTick(curTick) : null;
+  if (camState) {
+    const pipW = Math.max(120, Math.round(fcCanvas.width * 0.28));
+    const pipH = Math.round(pipW * 9 / 16);
+    const margin = 16;
+    const px = fcCanvas.width - pipW - margin;
+    const pyFromBottom = fcCanvas.height - pipH - margin;
+
+    fcGl.enable(fcGl.SCISSOR_TEST);
+    fcGl.scissor(px, pyFromBottom, pipW, pipH);
+    fcGl.clearColor(0.4, 0.63, 0.9, 1);
+    fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
+
+    const pipAspect = pipW / Math.max(1, pipH);
+    const pipProj = fcMat4Perspective((camState.fov || 70) * Math.PI / 180, pipAspect, 0.1, 3000);
+    const { forward } = fcGetCameraVectors(camState.yaw, camState.pitch);
+    const pipCenter = [camState.pos[0] + forward[0], camState.pos[1] + forward[1], camState.pos[2] + forward[2]];
+    const pipView = fcMat4LookAt(camState.pos, pipCenter, [0, 1, 0]);
+    drawTerrainWithMatrices(pipView, pipProj, px, pyFromBottom, pipW, pipH);
+
+    fcGl.disable(fcGl.SCISSOR_TEST);
   }
 }

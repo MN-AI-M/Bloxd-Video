@@ -81,7 +81,13 @@
                 background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 11px; border-radius:8px;
                 white-space:pre-line; border:1px solid var(--border); }
   #gotoBtn { position:absolute; top:12px; right:12px; z-index:5; }
-  #fovBox { position:absolute; top:12px; right:150px; z-index:5; display:flex; align-items:center; gap:8px;
+  #globalSettingBtn { position:absolute; top:12px; right:150px; z-index:5; }
+  #globalSettingBtn.active { background: var(--emerald); color: var(--emerald-ink); border-color: var(--emerald); }
+  #gsHint { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:none;
+            background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); color: var(--ink); padding:8px 14px;
+            border-radius:8px; font-size:12.5px; pointer-events:none; white-space:nowrap; border:1px solid var(--border); }
+  #gsHint.show { display:block; }
+  #fovBox { position:absolute; top:12px; right:288px; z-index:5; display:flex; align-items:center; gap:8px;
             background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 12px; border-radius:8px;
             border:1px solid var(--border); font-size:12px; color: var(--muted); }
   #fovValue { min-width:30px; display:inline-block; text-align:right; color: var(--ink); }
@@ -187,7 +193,7 @@
   /* ============================================================
      ブロック編集パネル(右からスライド、左端をドラッグして幅調整)
      ============================================================ */
-  #editPanel { position:fixed; top:0; right:0; bottom:0; width:340px; background: var(--surface);
+  #editPanel { position:fixed; top:0; right:0; bottom:0; width:440px; background: var(--surface);
                border-left:1px solid var(--border); z-index:15; display:none; flex-direction:column;
                box-shadow: -8px 0 24px rgba(0,0,0,0.35); }
   #editPanel.open { display:flex; }
@@ -214,6 +220,15 @@
   .swatch { width:26px; height:26px; border-radius:50%; border:2px solid var(--border); cursor:pointer; padding:0; }
   .swatch.active { border-color: var(--ink); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--ink); }
   .panelHint { font-size:12px; color: var(--muted); line-height:1.6; }
+  .panelSection { border-top:1px solid var(--border); padding-top:14px; margin-top:2px; }
+  .panelSectionLabel { font-size:11px; color: var(--muted); text-transform:uppercase; letter-spacing:.06em;
+                        font-weight:700; margin-bottom:2px; }
+  .checkboxRow { display:flex; align-items:center; gap:9px; font-size:13.5px; cursor:pointer; user-select:none; }
+  .checkboxRow input { width:16px; height:16px; cursor:pointer; accent-color: var(--gold); }
+  .modeChoiceRow { display:flex; gap:8px; }
+  .modeChoiceBtn { flex:1; padding:12px 8px; border-radius:8px; border:1px solid var(--border); background: var(--surface-2);
+                   color: var(--ink); font-size:12.5px; cursor:pointer; text-align:center; line-height:1.5; }
+  .modeChoiceBtn.active { border-color: var(--emerald); background: rgba(62,207,142,0.12); color: var(--emerald); font-weight:700; }
   #editPanelBody .btn { width:100%; justify-content:center; }
   #recordStatusLine { font-size:12.5px; color: var(--muted); min-height:18px; }
   #deleteBlockBtn { color:#e06060; border-color:#4a2222; }
@@ -268,8 +283,10 @@
     <div id="freecamStatus">-</div>
     <div id="loadStatus"></div>
     <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
+    <button id="globalSettingBtn" class="btn btn-ghost btn-sm">🎛 詳細編集</button>
     <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
     <div id="vpIndicator"><span class="dot"></span><span id="vpIndicatorText"></span></div>
+    <div id="gsHint">ドラッグでカメラを回転・スクロールでズーム / 緑のアイコン=カメラ位置、クリックで選択・ダブルクリックで編集 / 右下=選択中のカメラの映像</div>
     <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Escでマウス解放<br>(離脱時: Space再生・Delete削除・Ctrl/Cmd+Z元に戻す)</div>
   </div>
 
@@ -323,6 +340,7 @@
 <script src="freecam.js"></script>
 <script src="timeline.js"></script>
 <script src="content-blocks.js"></script>
+<script src="entities3d.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>
