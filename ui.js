@@ -199,11 +199,13 @@ document.getElementById('processBtn').addEventListener('click', async () => {
           document.getElementById('freecamHint').style.display = on ? 'none' : '';
           document.getElementById('freecamCrosshair').style.display = on ? 'none' : '';
           document.getElementById('gotoBtn').style.display = on ? 'none' : '';
+          document.getElementById('textOverlayLayer').classList.toggle('gs-preview-scoped', on);
         };
         setupEntitySelector();
         setupTimelineControls();
         initTimelineUI();
         setupFovControl();
+        setupProjectSettingsModal();
         await initFreecamOnce();
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で

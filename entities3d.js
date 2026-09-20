@@ -26,13 +26,15 @@ const HUMANOID_PARTS = [
 let humanoidVertexData = null; // [x,y,z,brightness, ...] (ローカル座標、1体ぶん)
 let humanoidVertexCount = 0;
 
+// 各面の4隅に対応する簡易UV(0〜1)。順序はFACE_OFFSETSの並びと合わせてある。
+const ENT3D_CORNER_UV = [[0, 1], [1, 1], [1, 0], [0, 0]];
+
 function buildHumanoidVertexData() {
   const verts = [];
   const order = [0, 1, 2, 0, 2, 3];
   for (const part of HUMANOID_PARTS) {
     const [cx, cy, cz] = part.center;
     const [sx, sy, sz] = part.size;
-    const hx = sx / 2, hy = sy / 2, hz = sz / 2;
     for (let dirCode = 0; dirCode < 6; dirCode++) {
       const offsets = FACE_OFFSETS[dirCode];
       const brightness = DIR_FACTOR[dirCode];
@@ -43,12 +45,13 @@ function buildHumanoidVertexData() {
         const lx = cx + (ox - 0.5) * sx;
         const ly = cy + (oy - 0.5) * sy;
         const lz = cz + (oz - 0.5) * sz;
-        verts.push(lx, ly, lz, brightness);
+        const [u, v] = ENT3D_CORNER_UV[oi];
+        verts.push(lx, ly, lz, brightness, u, v);
       }
     }
   }
   humanoidVertexData = new Float32Array(verts);
-  humanoidVertexCount = verts.length / 4;
+  humanoidVertexCount = verts.length / 6;
 }
 
 // カメラギズモ: 本体(小さい箱)+レンズ(前に出っ張った小さい箱)。
@@ -75,37 +78,45 @@ function buildGizmoVertexData() {
         const lx = cx + (ox - 0.5) * sx;
         const ly = cy + (oy - 0.5) * sy;
         const lz = cz + (oz - 0.5) * sz;
-        verts.push(lx, ly, lz, brightness);
+        verts.push(lx, ly, lz, brightness, 0, 0); // ギズモはテクスチャを使わないのでUVはダミー
       }
     }
   }
   gizmoVertexData = new Float32Array(verts);
-  gizmoVertexCount = verts.length / 4;
+  gizmoVertexCount = verts.length / 6;
 }
 
 
 // ============================================================
-// シェーダー(色は tint uniform 1個。brightnessで陰影だけ付ける)
+// シェーダー(色は tint uniform 1個。brightnessで陰影だけ付ける。
+// uUseTextureが立ってる時だけ、uTextureをサンプルして重ねる)
 // ============================================================
 
 const ENT3D_VERTEX_SRC = `
   attribute vec3 aPos;
   attribute float aBrightness;
+  attribute vec2 aUV;
   uniform mat4 uView;
   uniform mat4 uProj;
   uniform mat4 uModel;
   varying float vBrightness;
+  varying vec2 vUV;
   void main() {
     gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
     vBrightness = aBrightness;
+    vUV = aUV;
   }
 `;
 const ENT3D_FRAGMENT_SRC = `
   precision mediump float;
   uniform vec3 uTint;
+  uniform float uUseTexture;
+  uniform sampler2D uTexture;
   varying float vBrightness;
+  varying vec2 vUV;
   void main() {
-    gl_FragColor = vec4(uTint * vBrightness, 1.0);
+    vec3 base = uUseTexture > 0.5 ? texture2D(uTexture, vUV).rgb : vec3(1.0);
+    gl_FragColor = vec4(base * uTint * vBrightness, 1.0);
   }
 `;
 const ENT3D_LINE_VERTEX_SRC = `
@@ -121,9 +132,12 @@ const ENT3D_LINE_FRAGMENT_SRC = `
 `;
 
 let ent3dProgram = null, ent3dVbo = null;
-let ent3dAPosLoc, ent3dABrightnessLoc, ent3dUViewLoc, ent3dUProjLoc, ent3dUModelLoc, ent3dUTintLoc;
+let ent3dAPosLoc, ent3dABrightnessLoc, ent3dAUVLoc, ent3dUViewLoc, ent3dUProjLoc, ent3dUModelLoc, ent3dUTintLoc, ent3dUUseTextureLoc, ent3dUTextureLoc;
 let lineProgram = null, lineVbo = null;
 let lineAPosLoc, lineUViewLoc, lineUProjLoc, lineUTintLoc;
+
+// プレイヤーのテクスチャ(project-settings.jsのsetPlayerTexture()から設定される)
+let humanoidTextureGL = null;
 
 function ent3dCompileShader(gl, type, src) {
   const s = gl.createShader(type);
@@ -150,10 +164,13 @@ function initEntities3D(gl) {
   }
   ent3dAPosLoc = gl.getAttribLocation(ent3dProgram, 'aPos');
   ent3dABrightnessLoc = gl.getAttribLocation(ent3dProgram, 'aBrightness');
+  ent3dAUVLoc = gl.getAttribLocation(ent3dProgram, 'aUV');
   ent3dUViewLoc = gl.getUniformLocation(ent3dProgram, 'uView');
   ent3dUProjLoc = gl.getUniformLocation(ent3dProgram, 'uProj');
   ent3dUModelLoc = gl.getUniformLocation(ent3dProgram, 'uModel');
   ent3dUTintLoc = gl.getUniformLocation(ent3dProgram, 'uTint');
+  ent3dUUseTextureLoc = gl.getUniformLocation(ent3dProgram, 'uUseTexture');
+  ent3dUTextureLoc = gl.getUniformLocation(ent3dProgram, 'uTexture');
 
   const lvs = ent3dCompileShader(gl, gl.VERTEX_SHADER, ENT3D_LINE_VERTEX_SRC);
   const lfs = ent3dCompileShader(gl, gl.FRAGMENT_SHADER, ENT3D_LINE_FRAGMENT_SRC);
@@ -170,6 +187,26 @@ function initEntities3D(gl) {
 
   buildHumanoidVertexData();
   buildGizmoVertexData();
+}
+
+
+// project-settings.js から、プレイヤーテクスチャがアップロードされた時に呼ばれる。
+// image: 読み込み済みのHTMLImageElement。nullを渡すとテクスチャ無し(灰色)に戻る。
+function setPlayerTexture(gl, image) {
+  if (!image) {
+    if (humanoidTextureGL) gl.deleteTexture(humanoidTextureGL);
+    humanoidTextureGL = null;
+    return;
+  }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  if (humanoidTextureGL) gl.deleteTexture(humanoidTextureGL);
+  humanoidTextureGL = tex;
 }
 
 
@@ -216,12 +253,24 @@ function renderHumanoids(gl, viewMatrix, projMatrix, tick) {
   gl.useProgram(ent3dProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, ent3dVbo);
   gl.bufferData(gl.ARRAY_BUFFER, humanoidVertexData, gl.STATIC_DRAW);
+  const stride = 24; // 6 floats: pos(3) + brightness(1) + uv(2)
   gl.enableVertexAttribArray(ent3dAPosLoc);
-  gl.vertexAttribPointer(ent3dAPosLoc, 3, gl.FLOAT, false, 16, 0);
+  gl.vertexAttribPointer(ent3dAPosLoc, 3, gl.FLOAT, false, stride, 0);
   gl.enableVertexAttribArray(ent3dABrightnessLoc);
-  gl.vertexAttribPointer(ent3dABrightnessLoc, 1, gl.FLOAT, false, 16, 12);
+  gl.vertexAttribPointer(ent3dABrightnessLoc, 1, gl.FLOAT, false, stride, 12);
+  gl.enableVertexAttribArray(ent3dAUVLoc);
+  gl.vertexAttribPointer(ent3dAUVLoc, 2, gl.FLOAT, false, stride, 16);
   gl.uniformMatrix4fv(ent3dUViewLoc, false, viewMatrix);
   gl.uniformMatrix4fv(ent3dUProjLoc, false, projMatrix);
+
+  if (humanoidTextureGL) {
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, humanoidTextureGL);
+    gl.uniform1i(ent3dUTextureLoc, 0);
+    gl.uniform1f(ent3dUUseTextureLoc, 1.0);
+  } else {
+    gl.uniform1f(ent3dUUseTextureLoc, 0.0);
+  }
 
   for (const eid in allTimelines.entities) {
     const ent = allTimelines.entities[eid];
@@ -234,8 +283,12 @@ function renderHumanoids(gl, viewMatrix, projMatrix, tick) {
 
     const model = modelMatrixYaw(x, y, z, yaw);
     gl.uniformMatrix4fv(ent3dUModelLoc, false, model);
-    const isLocalPlayer = (eid === allTimelines.localPlayerEntityId);
-    gl.uniform3f(ent3dUTintLoc, isLocalPlayer ? 0.85 : 0.6, isLocalPlayer ? 0.85 : 0.6, isLocalPlayer ? 0.9 : 0.62);
+    if (humanoidTextureGL) {
+      gl.uniform3f(ent3dUTintLoc, 1, 1, 1); // テクスチャありなら、色はテクスチャそのものを使う
+    } else {
+      const isLocalPlayer = (eid === allTimelines.localPlayerEntityId);
+      gl.uniform3f(ent3dUTintLoc, isLocalPlayer ? 0.85 : 0.6, isLocalPlayer ? 0.85 : 0.6, isLocalPlayer ? 0.9 : 0.62);
+    }
     gl.drawArrays(gl.TRIANGLES, 0, humanoidVertexCount);
   }
 }
@@ -267,10 +320,14 @@ function renderCameraGizmos(gl, viewMatrix, projMatrix, selectedId) {
   gl.useProgram(ent3dProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, ent3dVbo);
   gl.bufferData(gl.ARRAY_BUFFER, gizmoVertexData, gl.STATIC_DRAW);
+  const stride = 24;
   gl.enableVertexAttribArray(ent3dAPosLoc);
-  gl.vertexAttribPointer(ent3dAPosLoc, 3, gl.FLOAT, false, 16, 0);
+  gl.vertexAttribPointer(ent3dAPosLoc, 3, gl.FLOAT, false, stride, 0);
   gl.enableVertexAttribArray(ent3dABrightnessLoc);
-  gl.vertexAttribPointer(ent3dABrightnessLoc, 1, gl.FLOAT, false, 16, 12);
+  gl.vertexAttribPointer(ent3dABrightnessLoc, 1, gl.FLOAT, false, stride, 12);
+  gl.enableVertexAttribArray(ent3dAUVLoc);
+  gl.vertexAttribPointer(ent3dAUVLoc, 2, gl.FLOAT, false, stride, 16);
+  gl.uniform1f(ent3dUUseTextureLoc, 0.0); // ギズモはテクスチャを使わない
   gl.uniformMatrix4fv(ent3dUViewLoc, false, viewMatrix);
   gl.uniformMatrix4fv(ent3dUProjLoc, false, projMatrix);
 

@@ -178,8 +178,8 @@ function updateActiveTextOverlays() {
 }
 
 function freecamAreaHeight() {
-  const area = document.getElementById('freecamArea');
-  return area ? area.clientHeight : 600;
+  const layer = document.getElementById('textOverlayLayer');
+  return layer ? layer.clientHeight : 600;
 }
 
 // フェード/スライド/ポップの、今この瞬間の見た目(不透明度・縦オフセット・拡大率)を計算する。
@@ -207,9 +207,13 @@ function textAnimState(block, heightPx) {
 function startTextDrag(e, block) {
   e.preventDefault();
   e.stopPropagation();
-  const area = document.getElementById('freecamArea');
+  // テキストのx,yは、このレイヤー自身の表示範囲を基準にした0〜1の割合。
+  // 通常表示では画面全体、シーンエディタ画面ではプレビュー側だけに
+  // レイヤーが絞られる(CSSの.gs-preview-scoped)ので、ここでの計算は
+  // レイヤー自身の矩形を見るだけで両方に自動対応する。
+  const layer = document.getElementById('textOverlayLayer');
   const move = (ev) => {
-    const rect = area.getBoundingClientRect();
+    const rect = layer.getBoundingClientRect();
     block.data.x = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
     block.data.y = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
     updateActiveTextOverlays();
