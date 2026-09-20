@@ -641,23 +641,27 @@ function fcFinishExport() {
 // ============================================================
 // global-setting画面(Mine-imator風のシーンエディタ)
 // ============================================================
-// 通常の自由カメラ(WASDで飛ぶ、その場で見た映像がそのまま記録される)
-// とは別に、こちらは「外から見下ろして、カメラの位置そのものを配置・
-// 調整する」ための画面。同じcanvas・同じ地形バッファ・同じテクスチャを
-// 使い回し、視点の操作方法とビューポートの使い方だけを切り替える形に
-// してある(2つ目のWebGLコンテキストを作ると、地形データを丸ごと
-// 複製することになりメモリを圧迫するため)。
+// 通常の自由カメラ画面(WASDで飛ぶ、一人称視点)とは完全に別の画面。
+// 左右に分割して:
+//   左 = シーン編集ビュー(オービット操作。地形・人物モデル・
+//        カメラギズモが見える。ここでカメラの配置を確認・選択する)
+//   右 = プレビュー(選択中/現在有効なカメラが実際に見る映像。
+//        「編集用の見た目」と「実際に撮れる映像」を分けて、
+//        同時に見比べられるようにしてある)
+// 分割位置は境界線をドラッグして調整できる。
 //
-// - ドラッグでオービット(注視点を中心に回転)、スクロールでズーム
-// - カメラギズモ(緑の小さいカメラ型アイコン)をクリックで選択、
-//   ダブルクリックでそのブロックの編集パネルを開く
-// - 画面右下に、選択中のカメラが実際に見る映像を小窓(PiP)で表示する
+// canvas・WebGLコンテキスト・地形バッファ・テクスチャアトラスは通常画面と
+// 完全に共用している(2つ目のコンテキストを作ると地形データを丸ごと
+// 複製することになりメモリを圧迫するため、ビューポートを分けて1フレームに
+// 2回描画する方式にしてある)。
 
 let gsMode = false;
+let gsSplitRatio = 0.5; // 0〜1、シーン編集ビューが占める横幅の割合
 let gsTarget = [0, 20, 0]; // オービットの注視点(worldOrigin基準のローカル座標)
 let gsDistance = 60;
 let gsYaw = 0, gsPitch = -0.5;
 let gsDragging = false, gsLastX = 0, gsLastY = 0;
+let gsDividerDragging = false;
 
 function toggleGlobalSetting() {
   gsMode = !gsMode;
@@ -669,6 +673,8 @@ function toggleGlobalSetting() {
   return gsMode;
 }
 
+function gsSceneWidth() { return Math.round(fcCanvas.width * gsSplitRatio); }
+
 function gsGetEyePosition() {
   const cp = Math.cos(gsPitch), sp = Math.sin(gsPitch);
   const cy = Math.cos(gsYaw), sy = Math.sin(gsYaw);
@@ -679,39 +685,64 @@ function gsGetEyePosition() {
   ];
 }
 
+// シーン編集ビュー(左側)の視点行列。ビューポート幅は分割後の左側の幅を使う
+// (右側と横幅が違うので、アスペクト比もそれぞれ別々に計算する)。
 function gsGetSceneMatrices() {
   const eye = gsGetEyePosition();
-  const aspect = fcCanvas.width / Math.max(1, fcCanvas.height);
+  const sceneW = gsSceneWidth();
+  const aspect = sceneW / Math.max(1, fcCanvas.height);
   const proj = fcMat4Perspective(60 * Math.PI / 180, aspect, 0.1, 3000);
   const view = fcMat4LookAt(eye, gsTarget, [0, 1, 0]);
   return { view, proj, eye };
 }
 
 function setupGlobalSettingControls() {
-  fcCanvas.addEventListener('mousedown', (e) => {
+  // 分割線のドラッグ(比率の調整)
+  const divider = document.getElementById('gsSplitDivider');
+  divider.addEventListener('mousedown', (e) => {
     if (!gsMode) return;
-    gsDragging = true; gsLastX = e.clientX; gsLastY = e.clientY;
+    e.preventDefault();
+    gsDividerDragging = true;
+    divider.classList.add('dragging');
   });
-  document.addEventListener('mouseup', () => { gsDragging = false; });
+  document.addEventListener('mouseup', () => {
+    gsDragging = false;
+    if (gsDividerDragging) { gsDividerDragging = false; divider.classList.remove('dragging'); }
+  });
   document.addEventListener('mousemove', (e) => {
+    if (gsDividerDragging) {
+      const rect = fcCanvas.getBoundingClientRect();
+      gsSplitRatio = Math.max(0.15, Math.min(0.85, (e.clientX - rect.left) / rect.width));
+      document.getElementById('freecamArea').style.setProperty('--gs-split', (gsSplitRatio * 100) + '%');
+      return;
+    }
     if (!gsMode || !gsDragging) return;
     const dx = e.clientX - gsLastX, dy = e.clientY - gsLastY;
     gsLastX = e.clientX; gsLastY = e.clientY;
     gsYaw -= dx * 0.006;
     gsPitch = Math.max(-1.5, Math.min(1.5, gsPitch - dy * 0.006));
   });
+
+  // シーン編集ビュー(左側)だけでオービット操作を受け付ける
+  fcCanvas.addEventListener('mousedown', (e) => {
+    if (!gsMode || e.clientX - fcCanvas.getBoundingClientRect().left > gsSceneWidth()) return;
+    gsDragging = true; gsLastX = e.clientX; gsLastY = e.clientY;
+  });
   fcCanvas.addEventListener('wheel', (e) => {
     if (!gsMode) return;
+    const rect = fcCanvas.getBoundingClientRect();
+    if (e.clientX - rect.left > gsSceneWidth()) return; // プレビュー側はズーム対象外
     e.preventDefault();
     gsDistance = Math.max(3, Math.min(500, gsDistance * (e.deltaY < 0 ? 0.9 : 1.1)));
   }, { passive: false });
 
   fcCanvas.addEventListener('click', (e) => {
-    if (!gsMode || gsJustDragged) return;
+    if (!gsMode) return;
     const rect = fcCanvas.getBoundingClientRect();
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+    if (cx > gsSceneWidth()) return; // プレビュー側のクリックは無視
     const { view, proj } = gsGetSceneMatrices();
-    const picked = (typeof pickCameraGizmo === 'function') ? pickCameraGizmo(cx, cy, view, proj, fcCanvas.width, fcCanvas.height) : null;
+    const picked = (typeof pickCameraGizmo === 'function') ? pickCameraGizmo(cx, cy, view, proj, gsSceneWidth(), fcCanvas.height) : null;
     if (picked && typeof renderBlocks === 'function') {
       selectedBlockId = picked.id;
       renderBlocks();
@@ -721,48 +752,52 @@ function setupGlobalSettingControls() {
     if (!gsMode) return;
     const rect = fcCanvas.getBoundingClientRect();
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+    if (cx > gsSceneWidth()) return;
     const { view, proj } = gsGetSceneMatrices();
-    const picked = (typeof pickCameraGizmo === 'function') ? pickCameraGizmo(cx, cy, view, proj, fcCanvas.width, fcCanvas.height) : null;
+    const picked = (typeof pickCameraGizmo === 'function') ? pickCameraGizmo(cx, cy, view, proj, gsSceneWidth(), fcCanvas.height) : null;
     if (picked && typeof openEditPanel === 'function') openEditPanel(picked);
   });
+
+  document.getElementById('freecamArea').style.setProperty('--gs-split', '50%');
 }
-let gsJustDragged = false; // ドラッグ操作の直後にクリック判定が誤発火しないようにする簡易フラグ(今は未使用の保険)
 
 function renderGlobalSettingFrame() {
   if (!fcGl) return;
+  fcGl.disable(fcGl.SCISSOR_TEST);
   fcGl.viewport(0, 0, fcCanvas.width, fcCanvas.height);
   fcGl.clearColor(0.05, 0.06, 0.08, 1);
   fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
 
-  const { view, proj } = gsGetSceneMatrices();
+  const sceneW = gsSceneWidth();
+  const previewW = fcCanvas.width - sceneW;
+  const h = fcCanvas.height;
 
-  drawTerrainWithMatrices(view, proj, 0, 0, fcCanvas.width, fcCanvas.height);
+  // --- 左: シーン編集ビュー(オービット) ---
+  fcGl.enable(fcGl.SCISSOR_TEST);
+  fcGl.scissor(0, 0, sceneW, h);
+  const { view, proj } = gsGetSceneMatrices();
+  drawTerrainWithMatrices(view, proj, 0, 0, sceneW, h);
   if (typeof renderHumanoids === 'function') renderHumanoids(fcGl, view, proj, curTick);
   if (typeof renderCameraGizmos === 'function') {
     renderCameraGizmos(fcGl, view, proj, typeof selectedBlockId !== 'undefined' ? selectedBlockId : null);
   }
 
-  // 右下に、選択中/現在有効なカメラが実際に見る映像を小窓で出す
-  const camState = (typeof getCameraStateAtTick === 'function') ? getCameraStateAtTick(curTick) : null;
-  if (camState) {
-    const pipW = Math.max(120, Math.round(fcCanvas.width * 0.28));
-    const pipH = Math.round(pipW * 9 / 16);
-    const margin = 16;
-    const px = fcCanvas.width - pipW - margin;
-    const pyFromBottom = fcCanvas.height - pipH - margin;
-
-    fcGl.enable(fcGl.SCISSOR_TEST);
-    fcGl.scissor(px, pyFromBottom, pipW, pipH);
+  // --- 右: プレビュー(選択中/現在有効なカメラの実際の映像) ---
+  if (previewW > 4) {
+    fcGl.scissor(sceneW, 0, previewW, h);
     fcGl.clearColor(0.4, 0.63, 0.9, 1);
     fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
 
-    const pipAspect = pipW / Math.max(1, pipH);
-    const pipProj = fcMat4Perspective((camState.fov || 70) * Math.PI / 180, pipAspect, 0.1, 3000);
-    const { forward } = fcGetCameraVectors(camState.yaw, camState.pitch);
-    const pipCenter = [camState.pos[0] + forward[0], camState.pos[1] + forward[1], camState.pos[2] + forward[2]];
-    const pipView = fcMat4LookAt(camState.pos, pipCenter, [0, 1, 0]);
-    drawTerrainWithMatrices(pipView, pipProj, px, pyFromBottom, pipW, pipH);
-
-    fcGl.disable(fcGl.SCISSOR_TEST);
+    const camState = (typeof getCameraStateAtTick === 'function') ? getCameraStateAtTick(curTick) : null;
+    if (camState) {
+      const previewAspect = previewW / Math.max(1, h);
+      const previewProj = fcMat4Perspective((camState.fov || 70) * Math.PI / 180, previewAspect, 0.1, 3000);
+      const { forward } = fcGetCameraVectors(camState.yaw, camState.pitch);
+      const previewCenter = [camState.pos[0] + forward[0], camState.pos[1] + forward[1], camState.pos[2] + forward[2]];
+      const previewView = fcMat4LookAt(camState.pos, previewCenter, [0, 1, 0]);
+      drawTerrainWithMatrices(previewView, previewProj, sceneW, 0, previewW, h);
+    }
   }
+
+  fcGl.disable(fcGl.SCISSOR_TEST);
 }

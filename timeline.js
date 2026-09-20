@@ -767,7 +767,7 @@ function hasAnyRecordedCamera() {
 }
 
 function overallCameraRange() {
-  const camBlocks = timelineBlocks.filter(b => b.track === 'camera' && b.data.cameraPath && b.data.cameraPath.size > 0);
+  const camBlocks = timelineBlocks.filter(blockHasCameraContent);
   if (camBlocks.length === 0) return null;
   return {
     start: Math.min(...camBlocks.map(b => b.startTick)),

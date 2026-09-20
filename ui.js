@@ -193,7 +193,9 @@ document.getElementById('processBtn').addEventListener('click', async () => {
           const on = toggleGlobalSetting();
           document.getElementById('globalSettingBtn').classList.toggle('active', on);
           document.getElementById('globalSettingBtn').innerText = on ? '🎥 通常表示に戻る' : '🎛 詳細編集';
-          document.getElementById('gsHint').classList.toggle('show', on);
+          document.getElementById('gsPaneLabels').classList.toggle('show', on);
+          document.getElementById('gsSplitDivider').classList.toggle('show', on);
+          document.getElementById('fovBox').style.display = on ? 'none' : '';
           document.getElementById('freecamHint').style.display = on ? 'none' : '';
           document.getElementById('freecamCrosshair').style.display = on ? 'none' : '';
           document.getElementById('gotoBtn').style.display = on ? 'none' : '';

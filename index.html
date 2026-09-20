@@ -83,10 +83,21 @@
   #gotoBtn { position:absolute; top:12px; right:12px; z-index:5; }
   #globalSettingBtn { position:absolute; top:12px; right:150px; z-index:5; }
   #globalSettingBtn.active { background: var(--emerald); color: var(--emerald-ink); border-color: var(--emerald); }
-  #gsHint { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); display:none;
-            background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); color: var(--ink); padding:8px 14px;
-            border-radius:8px; font-size:12.5px; pointer-events:none; white-space:nowrap; border:1px solid var(--border); }
-  #gsHint.show { display:block; }
+
+  /* --- global-setting: 分割画面(シーン編集 / プレビュー) --- */
+  #gsPaneLabels { display:none; }
+  #gsPaneLabels.show { display:block; }
+  #gsSceneLabel, #gsPreviewLabel { position:absolute; top:12px; z-index:6; font-size:12px; color: var(--muted);
+                background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 12px; border-radius:8px;
+                border:1px solid var(--border); white-space:nowrap; }
+  #gsSceneLabel { left:12px; }
+  #gsPreviewLabel { left:calc(var(--gs-split, 50%) + 12px); }
+  #gsSplitDivider { position:absolute; top:0; bottom:0; left:var(--gs-split, 50%); width:6px; margin-left:-3px;
+                     background: var(--border); cursor:ew-resize; z-index:7; display:none; }
+  #gsSplitDivider.show { display:block; }
+  #gsSplitDivider:hover, #gsSplitDivider.dragging { background: var(--gold); }
+  #gsSplitDivider::after { content:'⋮'; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+                            color: var(--muted); font-size:14px; }
   #fovBox { position:absolute; top:12px; right:288px; z-index:5; display:flex; align-items:center; gap:8px;
             background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 12px; border-radius:8px;
             border:1px solid var(--border); font-size:12px; color: var(--muted); }
@@ -286,7 +297,11 @@
     <button id="globalSettingBtn" class="btn btn-ghost btn-sm">🎛 詳細編集</button>
     <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
     <div id="vpIndicator"><span class="dot"></span><span id="vpIndicatorText"></span></div>
-    <div id="gsHint">ドラッグでカメラを回転・スクロールでズーム / 緑のアイコン=カメラ位置、クリックで選択・ダブルクリックで編集 / 右下=選択中のカメラの映像</div>
+    <div id="gsPaneLabels">
+      <div id="gsSceneLabel">🎛 シーン編集(ドラッグで回転・スクロールでズーム / 緑=カメラ、クリックで選択・ダブルクリックで編集)</div>
+      <div id="gsPreviewLabel">🎬 プレビュー(選択中のカメラの映像)</div>
+    </div>
+    <div id="gsSplitDivider"></div>
     <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Escでマウス解放<br>(離脱時: Space再生・Delete削除・Ctrl/Cmd+Z元に戻す)</div>
   </div>
 
