@@ -455,6 +455,20 @@ function freecamLoop(now) {
   }
   if (typeof updatePlayheadPosition === 'function') updatePlayheadPosition();
 
+  // 書き出し中だけ、WebGLの描画結果とテキストを2Dキャンバスに合成する
+  // (MediaRecorderはこの合成キャンバスの方を録画してる。プレビュー中は
+  // 普通にfcCanvasを直接表示してるだけで、この合成は走らない)
+  if (fcExporting && fcExportComposite) {
+    const { canvas, ctx } = fcExportComposite;
+    if (canvas.width !== fcCanvas.width || canvas.height !== fcCanvas.height) {
+      canvas.width = fcCanvas.width; canvas.height = fcCanvas.height;
+    }
+    ctx.drawImage(fcCanvas, 0, 0);
+    if (typeof drawActiveTextOverlaysToCanvas === 'function') {
+      drawActiveTextOverlaysToCanvas(ctx, canvas.width, canvas.height);
+    }
+  }
+
   if (fcExporting && curTick >= fcExportEndTick) {
     fcFinishExport();
   }
@@ -521,6 +535,7 @@ let fcExporting = false;
 let fcExportEndTick = 0;
 let fcMediaRecorder = null;
 let fcRecordedBlobs = [];
+let fcExportComposite = null; // { canvas, ctx } — 書き出し中だけ使う、テキストを焼き込むための2Dキャンバス
 
 // timeline.js から呼ばれる、プレビューモードの唯一の入口。
 function fcSetPreviewMode(on) {
@@ -542,9 +557,23 @@ function fcStartExport() {
   fcSetPreviewMode(true);
   curTick = range.start;
 
-  const stream = fcCanvas.captureStream(30);
+  // WebGLの描画結果(fcCanvas)をそのまま録画するのではなく、テキストを
+  // 焼き込んだ合成キャンバスを作ってそちらを録画する(freecamLoop側で
+  // 毎フレーム描き込む)。
+  const compositeCanvas = document.createElement('canvas');
+  compositeCanvas.width = fcCanvas.width;
+  compositeCanvas.height = fcCanvas.height;
+  fcExportComposite = { canvas: compositeCanvas, ctx: compositeCanvas.getContext('2d') };
+
+  const videoStream = compositeCanvas.captureStream(30);
+  const tracks = [...videoStream.getVideoTracks()];
+  if (typeof ensureAudioDestination === 'function' && typeof hasAnyMusic === 'function' && hasAnyMusic()) {
+    tracks.push(...ensureAudioDestination().stream.getAudioTracks());
+  }
+  const stream = new MediaStream(tracks);
+
   fcRecordedBlobs = [];
-  const mimeCandidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+  const mimeCandidates = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
   const mimeType = mimeCandidates.find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
   try {
@@ -552,6 +581,7 @@ function fcStartExport() {
   } catch (e) {
     alert('動画の書き出し準備に失敗しました: ' + e.message);
     fcSetPreviewMode(false);
+    fcExportComposite = null;
     return false;
   }
   fcMediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) fcRecordedBlobs.push(e.data); };
@@ -565,6 +595,7 @@ function fcStartExport() {
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 10000);
+    fcExportComposite = null;
     if (typeof onExportFinished === 'function') onExportFinished();
   };
 

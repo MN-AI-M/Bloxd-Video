@@ -99,6 +99,12 @@
   #vpIndicator.prev .dot { background: var(--amethyst); }
   @keyframes vpPulse { 0%,100% { opacity:1; } 50% { opacity:.25; } }
 
+  /* --- テキストブロックのライブ表示(3Dビュー上に直接乗せて、ドラッグで位置調整) --- */
+  #textOverlayLayer { position:absolute; inset:0; z-index:4; pointer-events:none; overflow:hidden; }
+  .textOverlayItem { position:absolute; pointer-events:auto; cursor:move; white-space:pre-wrap;
+                      font-family: var(--font-ui); text-shadow: 0 2px 6px rgba(0,0,0,0.6);
+                      max-width:80%; text-align:center; user-select:none; }
+
   /* --- タイムラインパネル(マルチトラック) --- */
   #timelinePanel { flex-shrink:0; background: var(--surface); border-top:1px solid var(--border);
                     display:flex; flex-direction:column; height:236px; user-select:none; }
@@ -159,6 +165,14 @@
   @keyframes tblockPulse { 0%,100% { filter:brightness(1); } 50% { filter:brightness(1.4); } }
   .tblock.snap-guide { box-shadow: 0 0 0 2px #fff; }
 
+  /* --- 音楽ブロック: 波形・フェードハンドル --- */
+  .tblock-wave { position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
+  .tblock-fade { position:absolute; top:0; bottom:0; pointer-events:none; }
+  .fadeHandle { position:absolute; top:3px; width:10px; height:10px; border-radius:50%;
+                background:#fff; border:2px solid rgba(0,0,0,0.4); cursor:ew-resize; z-index:2; }
+  .fadeHandle.fadeInHandle { left:3px; }
+  .fadeHandle.fadeOutHandle { right:3px; }
+
   /* 選択中のブロックに出す、クイック操作のミニツールバー */
   .tblock-toolbar { position:absolute; bottom:100%; margin-bottom:4px; left:0; display:flex; gap:3px;
                      background: var(--surface-2); border:1px solid var(--border); border-radius:6px; padding:3px;
@@ -188,6 +202,18 @@
   .fieldRow { display:flex; flex-direction:column; gap:6px; }
   .fieldRow label { font-size:12px; color: var(--muted); }
   .fieldRow .value { font-family: var(--font-display); font-variant-numeric: tabular-nums; font-size:14px; }
+  .textInput { width:100%; background: var(--surface-2); color: var(--ink); border:1px solid var(--border);
+               border-radius:7px; padding:9px 10px; font-family: var(--font-ui); font-size:14px; resize:vertical; }
+  .panelSelect { width:100%; background: var(--surface-2); color: var(--ink); border:1px solid var(--border);
+                 border-radius:7px; padding:9px 10px; font-family: var(--font-ui); font-size:13px; }
+  .segmentedRow { display:flex; gap:6px; }
+  .segBtn { flex:1; padding:8px; border-radius:7px; border:1px solid var(--border); background: var(--surface-2);
+            color: var(--ink); font-size:13px; cursor:pointer; }
+  .segBtn.active { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); font-weight:700; }
+  .swatchRow { display:flex; gap:8px; flex-wrap:wrap; }
+  .swatch { width:26px; height:26px; border-radius:50%; border:2px solid var(--border); cursor:pointer; padding:0; }
+  .swatch.active { border-color: var(--ink); box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--ink); }
+  .panelHint { font-size:12px; color: var(--muted); line-height:1.6; }
   #editPanelBody .btn { width:100%; justify-content:center; }
   #recordStatusLine { font-size:12.5px; color: var(--muted); min-height:18px; }
   #deleteBlockBtn { color:#e06060; border-color:#4a2222; }
@@ -238,6 +264,7 @@
   <div id="freecamArea">
     <canvas id="freecamCanvas"></canvas>
     <div id="freecamCrosshair"></div>
+    <div id="textOverlayLayer"></div>
     <div id="freecamStatus">-</div>
     <div id="loadStatus"></div>
     <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
@@ -295,6 +322,7 @@
 <script src="shared.js"></script>
 <script src="freecam.js"></script>
 <script src="timeline.js"></script>
+<script src="content-blocks.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>

@@ -31,8 +31,8 @@
 
 const TRACKS = [
   { id: 'camera', label: '🎥 カメラ',   color: '#3ECF8E', ink: '#04241A', enabled: true },
-  { id: 'text',   label: '📝 テキスト', color: '#8B7FE8', ink: '#17123A', enabled: false },
-  { id: 'music',  label: '🎵 音楽',    color: '#5B8AC9', ink: '#0E1E31', enabled: false },
+  { id: 'text',   label: '📝 テキスト', color: '#8B7FE8', ink: '#17123A', enabled: true },
+  { id: 'music',  label: '🎵 音楽',    color: '#5B8AC9', ink: '#0E1E31', enabled: true },
   { id: 'pose',   label: '🕺 ポーズ',   color: '#E8A33D', ink: '#2A1B04', enabled: false },
 ];
 
@@ -194,6 +194,8 @@ function updatePlayheadPosition() {
   ph.style.left = (LABEL_WIDTH + tickToPx(curTick)) + 'px';
   updateTimecode();
   updateViewportIndicator();
+  if (typeof updateActiveTextOverlays === 'function') updateActiveTextOverlays();
+  if (typeof syncMusicPlayback === 'function') syncMusicPlayback();
 }
 
 function renderBlocks() {
@@ -242,8 +244,10 @@ function buildBlockElement(block, track) {
 
   leftHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); startBlockDrag(e, block, 'resize-left'); });
   rightHandle.addEventListener('mousedown', (e) => { e.stopPropagation(); startBlockDrag(e, block, 'resize-right'); });
-  el.addEventListener('mousedown', (e) => { if (e.target === el || e.target === label || e.target === sub) startBlockDrag(e, block, 'move'); });
+  el.addEventListener('mousedown', (e) => { if (e.target === el || e.target === label || e.target === sub || e.target.classList.contains('tblock-wave')) startBlockDrag(e, block, 'move'); });
   el.addEventListener('dblclick', (e) => { e.stopPropagation(); openEditPanel(block); });
+
+  if (block.track === 'music' && typeof renderMusicBlockVisual === 'function') renderMusicBlockVisual(el, block);
 
   if (isSelected) el.appendChild(buildBlockToolbar(block));
 
@@ -273,6 +277,12 @@ function blockDisplayName(block) {
     if (block.id === activeRecordingBlockId) return '⏺ 記録中...';
     return block.data.cameraPath && block.data.cameraPath.size > 0 ? '🎥 カメラワーク' : '🎥 (未記録)';
   }
+  if (block.track === 'text') {
+    return block.data.content ? block.data.content : '📝 (空のテキスト)';
+  }
+  if (block.track === 'music') {
+    return block.data.fileName ? '🎵 ' + block.data.fileName : '🎵 音楽';
+  }
   return block.track;
 }
 
@@ -281,25 +291,30 @@ function blockDisplayName(block) {
 // ブロックの追加・複製・削除
 // ============================================================
 
-// 「＋」を押した瞬間に、ブロックを作って記録も始める(手数を減らすため)。
+function createBlock(trackId, startTick, endTick, type, data) {
+  const block = { id: nextBlockId++, track: trackId, startTick, endTick, type, data };
+  timelineBlocks.push(block);
+  return block;
+}
+
+// 「＋」を押した瞬間に始まる操作は、トラックの種類ごとに一番自然な
+// ものにしてある(カメラ=即記録、テキスト=すぐ入力、音楽=すぐファイル選択)。
 function addBlockOnTrack(trackId) {
   const track = TRACKS.find(t => t.id === trackId);
   if (!track || !track.enabled) return;
-  pushUndo();
-  const start = curTick;
-  const end = Math.min(totalTimelineTicks() + DEFAULT_BLOCK_TICKS, start + DEFAULT_BLOCK_TICKS);
-  const block = {
-    id: nextBlockId++,
-    track: trackId,
-    startTick: start,
-    endTick: Math.max(end, start + 5),
-    type: 'freeRecord',
-    data: { cameraPath: new Map() },
-  };
-  timelineBlocks.push(block);
-  selectedBlockId = block.id;
-  renderTimeline();
-  if (trackId === 'camera') startRecordingBlock(block.id);
+  if (trackId === 'camera') {
+    pushUndo();
+    const start = curTick;
+    const end = Math.min(totalTimelineTicks() + DEFAULT_BLOCK_TICKS, start + DEFAULT_BLOCK_TICKS);
+    const block = createBlock('camera', start, Math.max(end, start + 5), 'freeRecord', { cameraPath: new Map() });
+    selectedBlockId = block.id;
+    renderTimeline();
+    startRecordingBlock(block.id);
+  } else if (trackId === 'text' && typeof addTextBlockAndEdit === 'function') {
+    addTextBlockAndEdit();
+  } else if (trackId === 'music' && typeof addMusicBlockFromFile === 'function') {
+    addMusicBlockFromFile();
+  }
 }
 
 function duplicateBlock(id) {
@@ -307,17 +322,17 @@ function duplicateBlock(id) {
   if (!block) return;
   pushUndo();
   const len = block.endTick - block.startTick;
-  const shifted = new Map();
-  for (const [t, v] of block.data.cameraPath) shifted.set(t + len, v);
-  const newBlock = {
-    id: nextBlockId++,
-    track: block.track,
-    startTick: block.endTick,
-    endTick: block.endTick + len,
-    type: block.type,
-    data: { cameraPath: shifted },
-  };
-  timelineBlocks.push(newBlock);
+  let newData;
+  if (block.track === 'camera') {
+    // カメラだけ、記録データが絶対tickで保存されてるので、新しい位置ぶんずらして複製する
+    const shifted = new Map();
+    for (const [t, v] of block.data.cameraPath) shifted.set(t + len, v);
+    newData = { cameraPath: shifted };
+  } else {
+    newData = structuredClone(block.data);
+  }
+  const newBlock = createBlock(block.track, block.endTick, block.endTick + len, block.type, newData);
+  if (block.track === 'music' && typeof onMusicBlockDuplicated === 'function') onMusicBlockDuplicated(block, newBlock);
   selectedBlockId = newBlock.id;
   renderTimeline();
   updateExportAvailability();
@@ -552,6 +567,9 @@ function refreshEditPanelFields(block) {
       body.appendChild(splitBtn);
     }
   }
+
+  if (block.track === 'text' && typeof buildTextEditFields === 'function') buildTextEditFields(block, body);
+  if (block.track === 'music' && typeof buildMusicEditFields === 'function') buildMusicEditFields(block, body);
 
   const duplicateBtn = document.createElement('button');
   duplicateBtn.className = 'btn btn-ghost';
