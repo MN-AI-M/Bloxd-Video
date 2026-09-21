@@ -1,8 +1,13 @@
 // ui.js
 // ============================================================
 // 「UI(操作)」だけを担当するファイル。アップロード処理、Pyodide(ブラウザ内
-// Python)の起動・呼び出し、ボタン・タイムラインバーの操作など。
-// 座標計算や描画そのものは renderer.js の方を見てください。
+// Python)の起動・呼び出し、再生・スクラブなど。
+// 座標計算や描画そのものは freecam.js の方を見てください。
+//
+// 【作り直し・ステップ1(コア)】
+// シーンエディタ・カメラ記録・タイムラインのブロック編集・書き出し・
+// プロジェクト設定はまだ含まれない(後続ステップでこのファイルに
+// 追加していく)。ここでは「アップロードして見るだけ」に必要な配線のみ。
 //
 // サーバーには一切通信しない。解析(デコード・map生成)は全部
 // Pyodideでブラウザの中だけで行う。テクスチャもこのサイトに同梱した
@@ -14,15 +19,6 @@ let playing = false, lastFrameTime = 0, animId = null;
 let textureUrls = null;           // ファイル名(拡張子なし) -> Blob URL
 let textureZipReadyPromise = null;
 let streamingDone = false;        // ストリーミング処理が最後まで終わったか
-
-const PYTHON_FILES = [
-  'avro_reader.py',
-  'bloxdreplay_decode_full.py',
-  'build_2d_map.py',
-  'build_all_timelines.py',
-  'web_glue.py',
-];
-const CSV_FILES = ['block_id_to_root.csv', 'asset_master.csv'];
 
 
 // ============================================================
@@ -64,18 +60,16 @@ ensureTexturesLoading().catch(() => {});
 // ============================================================
 // Pyodide(ブラウザ内Python)の初期化
 // ============================================================
-// v2: Pyodideの実行をWeb Worker(pyodide-worker.js)に移した。今までは
-//     メインスレッド(画面描画やマウス操作を処理してるのと同じスレッド)で
-//     Pythonを同期的に呼んでたので、重い処理の間は操作が固まって見えていた。
-//     Worker内で実行することで、Pythonが計算してる間も画面やマウス操作が
-//     止まらなくなる。やり取りはpostMessage経由(リクエストごとにidを
-//     振って、対応するレスポンスを紐付ける)。
+// Pyodideの実行はWeb Worker(pyodide-worker.js)の中で行う。メインスレッド
+// (画面描画やマウス操作を処理してるのと同じスレッド)で同期的に呼ぶと、
+// 重い処理の間は操作が固まって見えるため。やり取りはpostMessage経由
+// (リクエストごとにidを振って、対応するレスポンスを紐付ける)。
 // ============================================================
 
 let pyWorker = null;
 let pyodideReadyPromise = null;
 let pyodideReadyResolve = null;
-const pendingWorkerRequests = new Map(); // id -> {resolve, reject}
+const pendingWorkerRequests = new Map(); // id -> {resolve, reject, onPartial}
 let nextWorkerRequestId = 1;
 
 function ensurePyodideLoading() {
@@ -127,8 +121,6 @@ function startPyWorker() {
 }
 
 // Workerにリクエストを送り、対応するレスポンスが来るまで待つ共通ヘルパー。
-// transferList を渡すと、その中身(例: バイト列のArrayBuffer)はコピー無しで
-// Workerに「移動」する(大きいファイルを送る時に効く)。
 function callPyWorker(type, payload, transferList) {
   return new Promise((resolve, reject) => {
     const id = nextWorkerRequestId++;
@@ -183,34 +175,19 @@ document.getElementById('processBtn').addEventListener('click', async () => {
       handleStreamingPartial(partial);
 
       if (!editorShown && allTimelines && Object.keys(allTimelines.entities).length > 0) {
-        // 最初にプレイヤーの情報が揃った時点で、すぐ再生できる画面に切り替える。
+        // 最初にプレイヤーの情報が揃った時点で、すぐ見られる画面に切り替える。
         // 続きの解析はこの後もバックグラウンドで続く。
         editorShown = true;
         document.getElementById('uploadScreen').classList.add('hidden');
         document.getElementById('editor').classList.add('active');
         document.getElementById('gotoBtn').onclick = () => fcGoToPlayer();
-        document.getElementById('globalSettingBtn').onclick = () => {
-          const on = toggleGlobalSetting();
-          document.getElementById('globalSettingBtn').classList.toggle('active', on);
-          document.getElementById('globalSettingBtn').innerText = on ? '🎥 通常表示に戻る' : '🎛 詳細編集';
-          document.getElementById('gsPaneLabels').classList.toggle('show', on);
-          document.getElementById('gsSplitDivider').classList.toggle('show', on);
-          document.getElementById('fovBox').style.display = on ? 'none' : '';
-          document.getElementById('freecamHint').style.display = on ? 'none' : '';
-          document.getElementById('freecamCrosshair').style.display = on ? 'none' : '';
-          document.getElementById('gotoBtn').style.display = on ? 'none' : '';
-          document.getElementById('textOverlayLayer').classList.toggle('gs-preview-scoped', on);
-        };
         setupEntitySelector();
-        setupTimelineControls();
-        initTimelineUI();
+        setupTransportControls();
         setupFovControl();
-        setupProjectSettingsModal();
         await initFreecamOnce();
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
         // 再描画してるので、ここで明示的な再描画は不要)
-        renderTimeline();
       }
 
       if (partial.done) {
@@ -312,92 +289,31 @@ function setupEntitySelector() {
   sel.addEventListener('change', () => {
     setRendererTimeline(allTimelines.entities[sel.value]);
     curTick = 0;
-    renderTimeline();
+    updateScrubUI();
   });
   setRendererTimeline(allTimelines.entities[sel.value]);
 }
 
 
 // ============================================================
-// タイムライン操作(再生・スクラブ)
+// 再生・スクラブ(簡易トランスポート。ブロック式タイムラインは後続ステップ)
 // ============================================================
 // 自由カメラは毎フレーム自分で再描画してる(freecamLoop)ので、ここでは
-// curTick/timelineの状態を更新するだけで良い(明示的な再描画呼び出しは不要)。
+// curTick/timelineの状態を更新するだけで良い。
 
-// ============================================================
-// 撮影(画角・全体プレビュー・書き出し)のUI配線
-// ============================================================
-// ブロックの記録・削除などは timeline.js の編集パネルが担当する。
-// ここでは「タイムライン全体」に対する操作(プレビュー・書き出し)と
-// 画角スライダーだけを扱う。
-
-function setupFovControl() {
-  const fovSlider = document.getElementById('fovSlider');
-  const fovValue = document.getElementById('fovValue');
-  fovSlider.oninput = () => {
-    fcFovDeg = parseInt(fovSlider.value);
-    fovValue.innerText = fcFovDeg + '°';
-  };
-
-  const previewBtn = document.getElementById('previewBtn');
-  const exportBtn = document.getElementById('exportBtn');
-
-  previewBtn.onclick = () => {
-    if (!hasAnyRecordedCamera()) return;
-    const turningOn = !fcPreviewMode;
-    fcSetPreviewMode(turningOn);
-    if (turningOn) {
-      const range = overallCameraRange();
-      if (range) { curTick = range.start; }
-      if (!isPlayingTimeline()) startTimelinePlayback();
-    }
-    previewBtn.innerText = fcPreviewMode ? '👋 手動操作に戻る' : '🎬 プレビュー';
-    previewBtn.classList.toggle('active', fcPreviewMode);
-  };
-
-  exportBtn.onclick = () => {
-    const started = fcStartExport();
-    if (started) {
-      document.getElementById('exportStatus').innerText = '⏺ 書き出し中...(終わるまでこの画面を離れないでください)';
-      previewBtn.disabled = true; exportBtn.disabled = true;
-      previewBtn.innerText = '🎬 プレビュー'; previewBtn.classList.add('active');
-    }
-  };
-
-  updateExportAvailability();
-}
-
-// カメラブロックの記録状況が変わるたび(timeline.jsから)呼ばれ、
-// プレビュー/書き出しボタンの有効・無効を揃える。
-function updateExportAvailability() {
-  const hasPath = typeof hasAnyRecordedCamera === 'function' && hasAnyRecordedCamera();
-  const previewBtn = document.getElementById('previewBtn');
-  const exportBtn = document.getElementById('exportBtn');
-  if (previewBtn) previewBtn.disabled = !hasPath;
-  if (exportBtn) exportBtn.disabled = !hasPath;
-}
-
-// freecam.jsのMediaRecorder.onstopから呼ばれる(書き出し完了・ダウンロード開始後)
-function onExportFinished() {
-  document.getElementById('exportStatus').innerText = '✅ 書き出し完了(ダウンロードを確認してください)';
-  setTimeout(() => { document.getElementById('exportStatus').innerText = ''; }, 5000);
-  updateExportAvailability();
-  document.getElementById('previewBtn').innerText = '🎬 プレビュー';
-  document.getElementById('previewBtn').classList.remove('active');
-}
-
-
-function setupTimelineControls() {
+function setupTransportControls() {
   document.getElementById('playBtn').addEventListener('click', () => {
-    if (playing) stopTimelinePlayback(); else startTimelinePlayback();
+    if (playing) stopPlayback(); else startPlayback();
+  });
+  const scrub = document.getElementById('scrubBar');
+  scrub.addEventListener('input', () => {
+    if (playing) stopPlayback();
+    curTick = parseInt(scrub.value);
+    updateScrubUI();
   });
 }
 
-// 他の機能(カメラ記録・書き出しなど)からも呼べるよう、再生の開始/停止を
-// 独立した関数にしてある。
-function isPlayingTimeline() { return playing; }
-
-function startTimelinePlayback() {
+function startPlayback() {
   if (playing) return;
   playing = true;
   document.getElementById('playBtn').innerText = '⏸ 一時停止';
@@ -405,7 +321,7 @@ function startTimelinePlayback() {
   playTick();
 }
 
-function stopTimelinePlayback() {
+function stopPlayback() {
   if (!playing) return;
   playing = false;
   document.getElementById('playBtn').innerText = '▶ 再生';
@@ -425,8 +341,7 @@ function playTick() {
     lastFrameTime = now;
     if (curTick >= maxAvailable) {
       if (streamingDone) {
-        // 本当にここで終わり
-        stopTimelinePlayback();
+        stopPlayback(); // 本当にここで終わり
         return;
       }
       // まだ裏で解析が続いてるので、今ある最後のフレームで一旦待つ
@@ -436,9 +351,42 @@ function playTick() {
   animId = requestAnimationFrame(playTick);
 }
 
+// freecamLoopから毎フレーム呼ばれる。スクラブバーと時刻表示を今のcurTickに揃える。
+function updateScrubUI() {
+  if (!timeline || !timeline.frames.length) return;
+  const scrub = document.getElementById('scrubBar');
+  const maxAvailable = timeline.frames.length - 1;
+  if (parseInt(scrub.max) !== maxAvailable) scrub.max = maxAvailable;
+  if (parseInt(scrub.value) !== curTick) scrub.value = curTick;
+
+  const tps = allTimelines.ticksPerSecond || 30;
+  const cur = curTick / tps, total = maxAvailable / tps;
+  document.getElementById('timecode').innerText = formatSeconds(cur) + ' / ' + formatSeconds(total);
+}
+
+function formatSeconds(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return m + ':' + String(s).padStart(2, '0');
+}
+
 
 // ============================================================
-// 画面表示のちょっとした更新(renderer.js から呼ばれる)
+// 画角(FOV)スライダー
+// ============================================================
+
+function setupFovControl() {
+  const fovSlider = document.getElementById('fovSlider');
+  const fovValue = document.getElementById('fovValue');
+  fovSlider.oninput = () => {
+    fcFovDeg = parseInt(fovSlider.value);
+    fovValue.innerText = fcFovDeg + '°';
+  };
+}
+
+
+// ============================================================
+// 画面表示のちょっとした更新(freecam.js から呼ばれる)
 // ============================================================
 
 function setStatusText(text) {
