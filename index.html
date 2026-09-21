@@ -80,10 +80,8 @@
   #loadStatus { position:absolute; top:50px; left:12px; color: var(--muted); font-size:12.5px;
                 background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 11px; border-radius:8px;
                 white-space:pre-line; border:1px solid var(--border); }
-  #gotoBtn { position:absolute; top:12px; right:12px; z-index:5; }
-  #globalSettingBtn { position:absolute; top:12px; right:150px; z-index:5; }
+  #topRightControls { position:absolute; top:12px; right:12px; z-index:5; display:flex; align-items:center; gap:8px; }
   #globalSettingBtn.active { background: var(--emerald); color: var(--emerald-ink); border-color: var(--emerald); }
-  #projectSettingsBtn { position:absolute; top:12px; right:288px; z-index:5; }
 
   /* --- global-setting: 分割画面(シーン編集 / プレビュー) --- */
   #gsPaneLabels { display:none; }
@@ -99,7 +97,7 @@
   #gsSplitDivider:hover, #gsSplitDivider.dragging { background: var(--gold); }
   #gsSplitDivider::after { content:'⋮'; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
                             color: var(--muted); font-size:14px; }
-  #fovBox { position:absolute; top:12px; right:420px; z-index:5; display:flex; align-items:center; gap:8px;
+  #fovBox { display:flex; align-items:center; gap:8px;
             background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 12px; border-radius:8px;
             border:1px solid var(--border); font-size:12px; color: var(--muted); }
   #fovValue { min-width:30px; display:inline-block; text-align:right; color: var(--ink); }
@@ -255,15 +253,30 @@
   #settingsModal { position:fixed; inset:0; z-index:20; display:none; align-items:center; justify-content:center;
                     background:rgba(5,6,9,0.6); backdrop-filter: blur(2px); }
   #settingsModal.open { display:flex; }
-  #settingsModalBox { width:440px; max-width:calc(100vw - 40px); max-height:calc(100vh - 80px);
+  #settingsModalBox { width:680px; max-width:calc(100vw - 40px); height:520px; max-height:calc(100vh - 80px);
                        background: var(--surface); border:1px solid var(--border); border-radius: var(--radius);
-                       display:flex; flex-direction:column; box-shadow: 0 16px 48px rgba(0,0,0,0.5); }
+                       display:flex; flex-direction:column; box-shadow: 0 16px 48px rgba(0,0,0,0.5); overflow:hidden; }
   #settingsModalHeader { display:flex; align-items:center; justify-content:space-between; padding:18px 20px;
-                          border-bottom:1px solid var(--border); }
+                          border-bottom:1px solid var(--border); flex-shrink:0; }
   #settingsModalHeader h2 { font-family: var(--font-display); font-size:16px; margin:0; }
   #settingsModalClose { background:none; border:none; color: var(--muted); font-size:18px; cursor:pointer; line-height:1; padding:4px; }
   #settingsModalClose:hover { color: var(--ink); }
-  #settingsModalBody { padding:20px; overflow-y:auto; display:flex; flex-direction:column; gap:16px; }
+
+  /* 左=カテゴリ一覧、右=選択中カテゴリの中身、という「設定ページ」の形。
+     今後カテゴリが増えたらSETTINGS_SECTIONSに追加するだけで、この構造のまま
+     破綻せずに項目を足していける。 */
+  #settingsModalMain { flex:1; min-height:0; display:flex; }
+  #settingsNav { width:168px; flex-shrink:0; border-right:1px solid var(--border); padding:12px;
+                 display:flex; flex-direction:column; gap:2px; overflow-y:auto; }
+  .settingsNavItem { display:flex; align-items:center; gap:9px; width:100%; padding:9px 10px; border:none;
+                      border-radius:7px; background:transparent; color: var(--muted); font-family: var(--font-ui);
+                      font-size:13.5px; text-align:left; cursor:pointer; transition: background .12s ease, color .12s ease; }
+  .settingsNavItem:hover { background: var(--surface-2); color: var(--ink); }
+  .settingsNavItem.active { background: var(--surface-2); color: var(--ink); font-weight:700; }
+  .settingsNavItem .navIcon { flex-shrink:0; }
+
+  #settingsModalBody { flex:1; min-width:0; padding:20px; overflow-y:auto; display:flex; flex-direction:column; gap:16px; }
+  .settingsSectionTitle { font-family: var(--font-display); font-size:14px; font-weight:700; margin:0 0 4px; }
   #playerTexturePreviewRow { display:flex; align-items:center; gap:14px; margin-top:8px; }
   #playerTexturePreview { width:56px; height:56px; border-radius:8px; border:1px solid var(--border);
                            background: var(--surface-2); display:flex; align-items:center; justify-content:center;
@@ -319,10 +332,12 @@
     <div id="textOverlayLayer"></div>
     <div id="freecamStatus">-</div>
     <div id="loadStatus"></div>
-    <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
-    <button id="globalSettingBtn" class="btn btn-ghost btn-sm">🎬 シーンエディタ</button>
-    <button id="projectSettingsBtn" class="btn btn-ghost btn-sm">⚙ 設定</button>
-    <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
+    <div id="topRightControls">
+      <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
+      <button id="globalSettingBtn" class="btn btn-ghost btn-sm">🎬 シーンエディタ</button>
+      <button id="projectSettingsBtn" class="btn btn-ghost btn-sm">⚙ 設定</button>
+      <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
+    </div>
     <div id="vpIndicator"><span class="dot"></span><span id="vpIndicatorText"></span></div>
     <div id="gsPaneLabels">
       <div id="gsSceneLabel">🎛 シーン編集(ドラッグで回転・スクロールでズーム / 緑=カメラ、クリックで選択・ダブルクリックで編集)</div>
@@ -368,26 +383,18 @@
 </div>
 
 <!-- プロジェクト全体の設定(3Dではない、普通のフォーム画面)。
-     今後、機能が増えるたびにここに項目が足されていく想定。 -->
+     左のカテゴリ一覧(#settingsNav)+右の中身(#settingsModalBody)という
+     「設定ページ」の形。中身はどちらもproject-settings.jsが動的に組み立てる。
+     今後、機能が増えるたびにSETTINGS_SECTIONSにカテゴリを1つ足すだけで済む。 -->
 <div id="settingsModal">
   <div id="settingsModalBox">
     <div id="settingsModalHeader">
       <h2>プロジェクト設定</h2>
       <button id="settingsModalClose">✕</button>
     </div>
-    <div id="settingsModalBody">
-      <div class="fieldRow">
-        <label>プレイヤーのテクスチャ</label>
-        <div class="panelHint">アップロードした画像を、3Dシーン内の人物モデルに貼り付けます。</div>
-        <div id="playerTexturePreviewRow">
-          <div id="playerTexturePreview">未設定</div>
-          <div id="playerTexturePreviewActions">
-            <input type="file" id="playerTextureInput" accept="image/*" style="display:none;">
-            <button id="playerTextureChooseBtn" class="btn btn-ghost btn-sm">画像を選ぶ</button>
-            <button id="playerTextureClearBtn" class="btn btn-ghost btn-sm" disabled>クリア</button>
-          </div>
-        </div>
-      </div>
+    <div id="settingsModalMain">
+      <nav id="settingsNav"></nav>
+      <div id="settingsModalBody"></div>
     </div>
   </div>
 </div>
