@@ -489,23 +489,25 @@ function setupFreecamControls() {
     const flying = document.pointerLockElement === fcCanvas;
     // 飛行中(マウスキャプチャ中)にFキーで、今いる場所を静的ショットとして固定する
     if (e.code === 'KeyF' && flying && !e.repeat) {
-      placeCameraHere();
+      try { placeCameraHere(); } catch (err) { console.error('カメラの配置に失敗しました:', err); }
     }
     // 飛行中にGキーで、動くショット用のウェイポイントを今いる場所に追加する
     if (e.code === 'KeyG' && flying && !e.repeat) {
-      addWaypointHere();
+      try { addWaypointHere(); } catch (err) { console.error('ウェイポイントの追加に失敗しました:', err); }
     }
     // 飛行中にEnterキーで、作成中のウェイポイント列を確定する
     if (e.code === 'Enter' && flying && !e.repeat) {
-      finishWaypointsHere();
+      try { finishWaypointsHere(); } catch (err) { console.error('ウェイポイントの確定に失敗しました:', err); }
     }
     // 飛行中でない時、選択中の点(カメラ全体、またはウェイポイント1点)を
     // Delete/Backspaceで削除する
     if ((e.code === 'Delete' || e.code === 'Backspace') && !flying && selectedCameraId != null && !e.repeat) {
-      scDeleteSelected();
-      updateSelectedCameraBox();
-      updatePinPVisibility();
-      previewIsMain = false; // 表示中だったプレビューが消えた場合に備えて編集視点に戻す
+      try {
+        scDeleteSelected();
+        updateSelectedCameraBox();
+        updatePinPVisibility();
+        previewIsMain = false; // 表示中だったプレビューが消えた場合に備えて編集視点に戻す
+      } catch (err) { console.error('削除に失敗しました:', err); }
     }
   });
   document.addEventListener('keyup', e => { if (fcActive) fcKeys[e.code] = false; });
@@ -517,19 +519,23 @@ function setupFreecamControls() {
 
     const rect = fcCanvas.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    const { view, proj } = _fcEditViewProj();
 
-    const activePoint = scGetActivePoint();
-    if (activePoint) {
-      const part = pickTransformGizmoPart(activePoint, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
-      if (part) { beginGizmoDrag(part, activePoint, mx, my); return; }
-    }
-    const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height);
-    if (picked) {
-      selectedCameraId = picked.camId;
-      selectedWaypointIndex = picked.waypointIndex;
-      updateSelectedCameraBox();
-      return;
+    try {
+      const { view, proj } = _fcEditViewProj();
+      const activePoint = scGetActivePoint();
+      if (activePoint) {
+        const part = pickTransformGizmoPart(activePoint, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
+        if (part) { beginGizmoDrag(part, activePoint, mx, my); return; }
+      }
+      const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height);
+      if (picked) {
+        selectedCameraId = picked.camId;
+        selectedWaypointIndex = picked.waypointIndex;
+        updateSelectedCameraBox();
+        return;
+      }
+    } catch (err) {
+      console.error('ギズモの選択処理でエラーが起きました:', err);
     }
     // 何もヒットしなかった時は、これまで通りクリックで飛行を開始する
     fcCanvas.requestPointerLock();
@@ -635,7 +641,10 @@ function fcUpdateStatus() {
   const statusEl = document.getElementById('freecamStatus');
   if (!statusEl) return;
   const wx = Math.round(fcPos[0] + worldOriginX), wy = Math.round(fcPos[1] + worldOriginY), wz = Math.round(fcPos[2] + worldOriginZ);
-  statusEl.innerText = `座標: (${wx}, ${wy}, ${wz})`;
+  const flying = document.pointerLockElement === fcCanvas;
+  // デバッグ用: カメラが実際に配置・選択できているかを、画面上でも確認できるようにしておく
+  statusEl.innerText = `座標: (${wx}, ${wy}, ${wz})\n` +
+    `飛行中: ${flying ? 'はい' : 'いいえ'} / 配置済みカメラ: ${sceneCameras.length} / 選択中ID: ${selectedCameraId ?? 'なし'}`;
 }
 
 function renderFreecam() {
@@ -742,7 +751,11 @@ function freecamLoop(now) {
   }
 
   previewTime += dt;
-  renderFreecam();
+  try {
+    renderFreecam();
+  } catch (err) {
+    console.error('描画中にエラーが起きました(このフレームだけスキップします):', err);
+  }
   fcUpdateStatus();
   if (timeline && timeline.frames.length && timeline.frames[curTick] && typeof updateFrameInfo === 'function') {
     updateFrameInfo(timeline.frames[curTick]);
