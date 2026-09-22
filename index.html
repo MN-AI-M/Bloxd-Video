@@ -70,6 +70,21 @@
   #freecamHint { position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
                  background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); color: var(--ink); padding:8px 14px;
                  border-radius:8px; font-size:12.5px; pointer-events:none; white-space:nowrap; border:1px solid var(--border); }
+
+  /* 右下の小窓(PinP)。実際の描画はWebGL側(freecam.js)がこの位置に合わせて
+     ビューポートを切っている。この div は縁取りとクリック受け皿だけを担当する。
+     位置・サイズは freecam.js の PINP_W/PINP_H/PINP_MARGIN と揃えてある。 */
+  #pinpInset { position:absolute; bottom:14px; right:14px; width:220px; height:140px;
+               border:2px solid var(--border); border-radius:8px; cursor:pointer;
+               box-shadow:0 6px 20px rgba(0,0,0,0.4); pointer-events:none; display:none; }
+  #pinpInset.show { display:block; pointer-events:auto; }
+  #pinpInset:hover { border-color: var(--gold); }
+
+  #selectedCameraBox { position:absolute; bottom:14px; left:14px; display:none; align-items:center; gap:10px;
+                        background:rgba(11,13,18,0.8); backdrop-filter: blur(4px); padding:8px 12px; border-radius:8px;
+                        border:1px solid var(--border); font-size:12px; color: var(--muted); }
+  #selectedCameraBox.show { display:flex; }
+  #selectedCamFovValue { min-width:28px; display:inline-block; text-align:right; color: var(--ink); }
   #freecamStatus { position:absolute; top:12px; left:12px; color: var(--ink); font-size:12.5px;
                     background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 11px; border-radius:8px;
                     white-space:pre-line; border:1px solid var(--border); }
@@ -146,7 +161,12 @@
       <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
       <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
     </div>
-    <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Escでマウス解放</div>
+    <div id="pinpInset" title="クリックで主画面と入れ替え"></div>
+    <div id="selectedCameraBox">
+      🎥 選択中のカメラ &nbsp;画角 <input type="range" id="selectedCamFov" min="30" max="110" value="70"><span id="selectedCamFovValue">70°</span>
+      &nbsp;<span style="opacity:.7">Delete/Backspaceで削除</span>
+    </div>
+    <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Fでこの場所にカメラを固定 / Escでマウス解放してギズモを操作</div>
   </div>
 
   <div id="transportBar">
@@ -158,6 +178,9 @@
   </div>
 </div>
 
+<!-- ⚠️ 現時点ではまだ timeline.js / content-blocks.js / project-settings.js
+     は読み込んでいない(ステップ4・5で追加予定)。今読んでも動かないため。 -->
+
 <!-- Pyodide(ブラウザ内でPythonを動かす仕組み)は、メインスレッドを止めない
      よう別スレッド(pyodide-worker.js、Web Worker)の中で読み込む。
      このページ自体からはpyodide.jsを直接読み込む必要はない。
@@ -166,9 +189,12 @@
 <!-- textures.zip をブラウザ内で展開するためのライブラリ(個々のpng配布の代わり) -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-<!-- 共有の状態・定数は shared.js、描画・操作は freecam.js、
-     UI(アップロード・Pyodide呼び出し・再生)は ui.js -->
+<!-- 共有の状態・定数は shared.js、シーンエディタの3D(人物モデル・
+     カメラギズモ・移動/回転ギズモ)は entities3d.js、地形描画・自由カメラ・
+     画面の主/小窓切り替えは freecam.js、UI(アップロード・Pyodide呼び出し・
+     再生)は ui.js -->
 <script src="shared.js"></script>
+<script src="entities3d.js"></script>
 <script src="freecam.js"></script>
 <script src="ui.js"></script>
 </body>
