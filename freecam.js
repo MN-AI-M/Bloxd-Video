@@ -2,19 +2,18 @@
 // ============================================================
 // 自由カメラ(プレイ画面のような一人称視点)+ シーンエディタ。
 //
-// 【作り直し・ステップ2(シーンエディタ)】
-// 常時WASD一人称視点がベース。「＋カメラを配置」の代わりに、飛行中に
-// Fキーを押すと今いる場所にカメラを固定できる(静的ショット。動く
-// ショット[ウェイポイント]はステップ3で追加)。選択中のカメラには
-// 移動ギズモ(XYZ矢印+XZ平面ハンドル)・回転ギズモ(yaw/pitchリング)が
-// 表示され、ドラッグで位置・向きを調整できる(操作はマウスキャプチャを
-// 解除している時のみ)。右下の小窓(PinP)に「今主画面になっていない方」
-// (編集視点 or 選択中カメラのプレビュー)を表示し、クリックで入れ替わる。
+// 【作り直し・ステップ3(動くショット・ウェイポイント方式)】
+// ステップ2の「Fキーで固定=静的ショット」に加えて、Gキーでウェイポイントを
+// 積み重ね、Enterキーで確定すると「動くショット」になる(スプライン補間で
+// なめらかに繋いだ軌道。連続記録ではなく、置いた点の数だけがギズモとして
+// 存在するので、点ごとにドラッグで調整できる)。選択中カメラが動くショットの
+// 時は、プレビューがその軌道をループ再生する。
 //
 // 操作: クリックでマウスキャプチャ開始、WASDで移動、Spaceで上昇、
-//       Shiftで下降、マウスで視点回転、Fでカメラ固定、Escでマウス解放。
-//       マウス解放中は、カメラのギズモをクリックで選択、ドラッグで移動/回転、
-//       Delete/Backspaceで選択中のカメラを削除。
+//       Shiftで下降、マウスで視点回転、Fでカメラ固定、Gでウェイポイント追加、
+//       Enterでウェイポイント列を確定、Escでマウス解放。
+//       マウス解放中は、ギズモをクリックで選択、ドラッグで移動/回転、
+//       Delete/Backspaceで選択中のカメラ全体を削除。
 // ============================================================
 
 let fcMeshFaces = [], fcMeshPalette = [];
@@ -351,14 +350,25 @@ function _fcEditViewProj() {
   return { view, proj };
 }
 
-// 配置済みカメラ(sceneCameras の1つ)から見た、view/proj行列を作る
+// 配置済みカメラ(sceneCameras の1つ)から見た、view/proj行列を作る。
+// 動くショットは、ループ再生するプレビュー時刻(previewTime)から
+// 現在位置・向きを補間して使う。
+function _camCurrentPose(cam) {
+  if (cam.mode === 'static') return { pos: cam.pos, yaw: cam.yaw, pitch: cam.pitch };
+  const duration = scWaypointCameraDuration(cam) || 1;
+  return scEvalWaypointCamera(cam, previewTime % duration);
+}
+
 function _camViewProj(cam, aspect) {
+  const pose = _camCurrentPose(cam);
   const proj = fcMat4Perspective(cam.fov * Math.PI / 180, aspect, 0.1, 3000);
-  const { forward } = fcGetCameraVectors(cam.yaw, cam.pitch);
-  const center = [cam.pos[0] + forward[0], cam.pos[1] + forward[1], cam.pos[2] + forward[2]];
-  const view = fcMat4LookAt(cam.pos, center, [0, 1, 0]);
+  const { forward } = fcGetCameraVectors(pose.yaw, pose.pitch);
+  const center = [pose.pos[0] + forward[0], pose.pos[1] + forward[1], pose.pos[2] + forward[2]];
+  const view = fcMat4LookAt(pose.pos, center, [0, 1, 0]);
   return { view, proj };
 }
+
+let previewTime = 0; // 動くショットのプレビューをループ再生するための経過秒数
 
 function _fcCurTickVal() {
   if (timeline && timeline.frames.length && timeline.frames[curTick]) return timeline.frames[curTick].tick;
@@ -370,38 +380,54 @@ function _fcCurTickVal() {
 // カメラの配置(自由飛行で行って、その場でスナップして固定)
 // ============================================================
 
+// F: 今いる場所を「静的ショット」として即座に固定する
 function placeCameraHere() {
-  scAddCamera(fcPos, fcYaw, fcPitch, fcFovDeg);
+  scAddStaticCamera(fcPos, fcYaw, fcPitch, fcFovDeg);
   updateSelectedCameraBox();
   updatePinPVisibility();
 }
 
+// G: 「動くショット」用のウェイポイントを、今いる場所に追加する
+// (1回目の押下で新しい列を始め、以降は同じ列に追加され続ける)
+function addWaypointHere() {
+  scAddInProgressWaypoint(fcPos, fcYaw, fcPitch, performance.now());
+}
+
+// Enter: 作成中のウェイポイント列を確定させる(2点未満なら何もしない)
+function finishWaypointsHere() {
+  const cam = scFinishInProgressWaypoints(fcFovDeg);
+  if (cam) {
+    updateSelectedCameraBox();
+    updatePinPVisibility();
+  }
+}
+
 
 // ============================================================
-// 移動・回転ギズモのドラッグ
+// 移動・回転ギズモのドラッグ(静的ショットの点/ウェイポイントの点、共通)
 // ============================================================
 
-function beginGizmoDrag(part, cam, mx, my) {
+function beginGizmoDrag(part, point, mx, my) {
   const ray = scRayFromScreen(mx, my, fcCanvas.width, fcCanvas.height, fcPos, fcYaw, fcPitch, fcFovDeg);
   dragState = {
-    part, camId: cam.id,
-    startPos: cam.pos.slice(), startYaw: cam.yaw, startPitch: cam.pitch,
+    part, point,
+    startPos: point.pos.slice(), startYaw: point.yaw, startPitch: point.pitch,
   };
   if (part.kind === 'axis') {
     dragState.axisDir = _axisVec(part.axis);
-    dragState.startT = scClosestTOnLine(ray, cam.pos, dragState.axisDir);
+    dragState.startT = scClosestTOnLine(ray, point.pos, dragState.axisDir);
   } else if (part.kind === 'plane') {
-    dragState.planeHit0 = scRayPlaneIntersect(ray, cam.pos, [0, 1, 0]);
+    dragState.planeHit0 = scRayPlaneIntersect(ray, point.pos, [0, 1, 0]);
   } else if (part.kind === 'ring' && part.ring === 'yaw') {
-    const hit = scRayPlaneIntersect(ray, cam.pos, [0, 1, 0]);
-    dragState.angle0 = hit ? Math.atan2(hit[0] - cam.pos[0], hit[2] - cam.pos[2]) : 0;
+    const hit = scRayPlaneIntersect(ray, point.pos, [0, 1, 0]);
+    dragState.angle0 = hit ? Math.atan2(hit[0] - point.pos[0], hit[2] - point.pos[2]) : 0;
   } else if (part.kind === 'ring' && part.ring === 'pitch') {
-    const { forward, right } = fcGetCameraVectors(cam.yaw, 0);
+    const { forward, right } = fcGetCameraVectors(point.yaw, 0);
     dragState.ringNormal = right;
     dragState.forwardAxis = forward;
-    const hit = scRayPlaneIntersect(ray, cam.pos, right);
+    const hit = scRayPlaneIntersect(ray, point.pos, right);
     if (hit) {
-      const rel = [hit[0]-cam.pos[0], hit[1]-cam.pos[1], hit[2]-cam.pos[2]];
+      const rel = [hit[0]-point.pos[0], hit[1]-point.pos[1], hit[2]-point.pos[2]];
       dragState.angle0 = Math.atan2(rel[1], rel[0]*forward[0] + rel[2]*forward[2]);
     } else {
       dragState.angle0 = 0;
@@ -411,20 +437,19 @@ function beginGizmoDrag(part, cam, mx, my) {
 
 function applyGizmoDrag(mx, my) {
   if (!dragState) return;
-  const cam = sceneCameras.find(c => c.id === dragState.camId);
-  if (!cam) { dragState = null; return; }
+  const point = dragState.point;
   const ray = scRayFromScreen(mx, my, fcCanvas.width, fcCanvas.height, fcPos, fcYaw, fcPitch, fcFovDeg);
   const part = dragState.part;
 
   if (part.kind === 'axis') {
     const t = scClosestTOnLine(ray, dragState.startPos, dragState.axisDir);
     const delta = t - dragState.startT;
-    cam.pos = dragState.startPos.map((v, i) => v + dragState.axisDir[i] * delta);
+    point.pos = dragState.startPos.map((v, i) => v + dragState.axisDir[i] * delta);
 
   } else if (part.kind === 'plane') {
     const hit = scRayPlaneIntersect(ray, dragState.startPos, [0, 1, 0]);
     if (hit && dragState.planeHit0) {
-      cam.pos = [
+      point.pos = [
         dragState.startPos[0] + (hit[0] - dragState.planeHit0[0]),
         dragState.startPos[1],
         dragState.startPos[2] + (hit[2] - dragState.planeHit0[2]),
@@ -436,7 +461,7 @@ function applyGizmoDrag(mx, my) {
     if (hit) {
       const angle1 = Math.atan2(hit[0] - dragState.startPos[0], hit[2] - dragState.startPos[2]);
       const delta = Math.atan2(Math.sin(angle1 - dragState.angle0), Math.cos(angle1 - dragState.angle0));
-      cam.yaw = dragState.startYaw + delta;
+      point.yaw = dragState.startYaw + delta;
     }
 
   } else if (part.kind === 'ring' && part.ring === 'pitch') {
@@ -446,7 +471,7 @@ function applyGizmoDrag(mx, my) {
       const angle1 = Math.atan2(rel[1], rel[0]*dragState.forwardAxis[0] + rel[2]*dragState.forwardAxis[2]);
       const delta = Math.atan2(Math.sin(angle1 - dragState.angle0), Math.cos(angle1 - dragState.angle0));
       const limit = Math.PI / 2 - 0.05;
-      cam.pitch = Math.max(-limit, Math.min(limit, dragState.startPitch + delta));
+      point.pitch = Math.max(-limit, Math.min(limit, dragState.startPitch + delta));
     }
   }
 }
@@ -461,13 +486,22 @@ function setupFreecamControls() {
     if (!fcActive) return;
     fcKeys[e.code] = true;
 
-    // 飛行中(マウスキャプチャ中)にFキーで、今いる場所にカメラを固定する
-    if (e.code === 'KeyF' && document.pointerLockElement === fcCanvas && !e.repeat) {
+    const flying = document.pointerLockElement === fcCanvas;
+    // 飛行中(マウスキャプチャ中)にFキーで、今いる場所を静的ショットとして固定する
+    if (e.code === 'KeyF' && flying && !e.repeat) {
       placeCameraHere();
     }
-    // 飛行中でない時、選択中のカメラをDelete/Backspaceで削除する
-    if ((e.code === 'Delete' || e.code === 'Backspace') &&
-        document.pointerLockElement !== fcCanvas && selectedCameraId != null && !e.repeat) {
+    // 飛行中にGキーで、動くショット用のウェイポイントを今いる場所に追加する
+    if (e.code === 'KeyG' && flying && !e.repeat) {
+      addWaypointHere();
+    }
+    // 飛行中にEnterキーで、作成中のウェイポイント列を確定する
+    if (e.code === 'Enter' && flying && !e.repeat) {
+      finishWaypointsHere();
+    }
+    // 飛行中でない時、選択中の点(カメラ全体、またはウェイポイント1点)を
+    // Delete/Backspaceで削除する
+    if ((e.code === 'Delete' || e.code === 'Backspace') && !flying && selectedCameraId != null && !e.repeat) {
       scDeleteSelected();
       updateSelectedCameraBox();
       updatePinPVisibility();
@@ -485,14 +519,15 @@ function setupFreecamControls() {
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const { view, proj } = _fcEditViewProj();
 
-    const sel = scGetSelected();
-    if (sel) {
-      const part = pickTransformGizmoPart(sel, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
-      if (part) { beginGizmoDrag(part, sel, mx, my); return; }
+    const activePoint = scGetActivePoint();
+    if (activePoint) {
+      const part = pickTransformGizmoPart(activePoint, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
+      if (part) { beginGizmoDrag(part, activePoint, mx, my); return; }
     }
     const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height);
     if (picked) {
-      selectedCameraId = picked.id;
+      selectedCameraId = picked.camId;
+      selectedWaypointIndex = picked.waypointIndex;
       updateSelectedCameraBox();
       return;
     }
@@ -535,12 +570,13 @@ function updatePinPVisibility() {
   document.getElementById('pinpInset').classList.toggle('show', sceneCameras.length > 0);
 }
 
-// 選択中カメラの情報ボックス(画角スライダー+削除のヒント)の表示を更新する
+// 選択中カメラの情報ボックス(画角スライダー+動くショットならウェイポイント一覧)の表示を更新する
 function updateSelectedCameraBox() {
   const box = document.getElementById('selectedCameraBox');
   const sel = scGetSelected();
-  if (!sel) { box.style.display = 'none'; return; }
-  box.style.display = 'flex';
+  if (!sel) { box.classList.remove('show'); return; }
+  box.classList.add('show');
+
   const fovSlider = document.getElementById('selectedCamFov');
   fovSlider.value = sel.fov;
   document.getElementById('selectedCamFovValue').innerText = Math.round(sel.fov) + '°';
@@ -548,6 +584,46 @@ function updateSelectedCameraBox() {
     sel.fov = parseInt(fovSlider.value);
     document.getElementById('selectedCamFovValue').innerText = sel.fov + '°';
   };
+
+  const listEl = document.getElementById('selectedCameraWaypointList');
+  listEl.innerHTML = '';
+  if (sel.mode !== 'waypoints') return;
+
+  sel.waypoints.forEach((wp, i) => {
+    const row = document.createElement('div');
+    row.className = 'waypointRow' + (i === selectedWaypointIndex ? ' active' : '');
+    const label = document.createElement('span');
+    label.innerText = `点${i + 1}`;
+    const timeInput = document.createElement('input');
+    timeInput.type = 'number';
+    timeInput.step = '0.1';
+    timeInput.min = i === 0 ? '0' : (sel.waypoints[i - 1].time + 0.1).toFixed(1);
+    timeInput.value = wp.time.toFixed(1);
+    const unit = document.createElement('span');
+    unit.innerText = '秒';
+
+    row.addEventListener('click', (e) => {
+      if (e.target === timeInput) return; // 数値欄のクリックでは選択を変えない
+      selectedCameraId = sel.id;
+      selectedWaypointIndex = i;
+      updateSelectedCameraBox();
+    });
+    timeInput.addEventListener('change', () => {
+      // 直前・直後のウェイポイントより手前/後ろへは動かせない(順序が崩れると補間が破綻するため)
+      const prevTime = i > 0 ? sel.waypoints[i - 1].time : -Infinity;
+      const nextTime = i < sel.waypoints.length - 1 ? sel.waypoints[i + 1].time : Infinity;
+      let v = parseFloat(timeInput.value);
+      if (isNaN(v)) v = wp.time;
+      v = Math.max(prevTime + 0.05, Math.min(nextTime - 0.05, v));
+      wp.time = v;
+      timeInput.value = v.toFixed(1);
+    });
+
+    row.appendChild(label);
+    row.appendChild(timeInput);
+    row.appendChild(unit);
+    listEl.appendChild(row);
+  });
 }
 
 
@@ -565,6 +641,7 @@ function fcUpdateStatus() {
 function renderFreecam() {
   if (!fcGl) return;
   const sel = scGetSelected();
+  const activePoint = scGetActivePoint();
   const hasCamera = sceneCameras.length > 0;
   const editVP = _fcEditViewProj();
 
@@ -582,9 +659,10 @@ function renderFreecam() {
     // 主画面=編集用のWASD視点
     drawTerrainWithMatrices(editVP.view, editVP.proj, 0, 0, fcCanvas.width, fcCanvas.height);
     renderHumanoids(fcGl, editVP.view, editVP.proj, _fcCurTickVal());
-    renderCameraGizmos(fcGl, editVP.view, editVP.proj);
-    if (sel && document.pointerLockElement !== fcCanvas) {
-      renderTransformGizmo(fcGl, editVP.view, editVP.proj, sel);
+    renderCameraGizmos(fcGl, editVP.view, editVP.proj, fcCanvas.width, fcCanvas.height);
+    renderInProgressWaypoints(fcGl, editVP.view, editVP.proj, fcCanvas.width, fcCanvas.height);
+    if (activePoint && document.pointerLockElement !== fcCanvas) {
+      renderTransformGizmo(fcGl, editVP.view, editVP.proj, activePoint, fcCanvas.width, fcCanvas.height);
     }
   }
 
@@ -663,6 +741,7 @@ function freecamLoop(now) {
     if (fcKeys['ShiftLeft'] || fcKeys['ShiftRight']) move([0, 1, 0], -d);
   }
 
+  previewTime += dt;
   renderFreecam();
   fcUpdateStatus();
   if (timeline && timeline.frames.length && timeline.frames[curTick] && typeof updateFrameInfo === 'function') {
