@@ -123,8 +123,13 @@ function initFreecamGL() {
 
 function resizeFreecamCanvas() {
   const area = document.getElementById('freecamArea');
-  fcCanvas.width = Math.max(1, area.clientWidth);
-  fcCanvas.height = Math.max(1, area.clientHeight);
+  const w = Math.max(1, area.clientWidth), h = Math.max(1, area.clientHeight);
+  // 実際にサイズが変わった時だけ書き換える(毎回代入するとWebGLの描画バッファが
+  // 毎フレーム作り直しになってしまうため)
+  if (fcCanvas.width !== w || fcCanvas.height !== h) {
+    fcCanvas.width = w;
+    fcCanvas.height = h;
+  }
 }
 
 
@@ -723,6 +728,11 @@ function freecamLoop(now) {
   if (!fcActive) return;
   const dt = fcLastFrameTime ? Math.min(0.1, (now - fcLastFrameTime) / 1000) : 0;
   fcLastFrameTime = now;
+
+  // タイムラインの行数が増減して#freecamAreaの大きさが変わることがあるので、
+  // ウィンドウ自体のリサイズを待たず、毎フレーム実際のサイズに追従させる
+  // (変化が無ければ何もしない軽いチェックのみ)
+  resizeFreecamCanvas();
 
   // マウスキャプチャ中(実際に飛んでる時)だけ移動キーを反映する。
   if (document.pointerLockElement === fcCanvas) {
