@@ -308,22 +308,34 @@ function nearestFrameAtOrBefore(frames, tick) {
 
 
 // ============================================================
-// 配置済みカメラ(シーンエディタで置いたもの)
-// ステップ4(複数カメラブロック)でタイムラインのブロックへ格上げされる
-// までの、この時点でのシンプルな置き場所。
+// 配置済みカメラ(シーンエディタで置いたもの)= 🎥カメラトラックのブロック。
 //
-// 静的ショット: { id, mode:'static', pos, yaw, pitch, fov }
-// 動くショット: { id, mode:'waypoints', waypoints:[{pos,yaw,pitch,time}], fov }
-//   waypointsは「秒」の昇順。timeは1点目からの経過秒数。
+// 静的ショット: { id, mode:'static', pos, yaw, pitch, fov, startTick, endTick, layer }
+// 動くショット: { id, mode:'waypoints', waypoints:[{pos,yaw,pitch,time}], fov, startTick, endTick, layer }
+//   waypointsは「秒」の昇順。timeは「ブロックの先頭(startTick)からの経過秒数」。
+//   layerは0が一番奥(背景)、大きいほど手前(PinP合成時に前面に出る)。
 // ============================================================
+
+const DEFAULT_BLOCK_SECONDS = 3;
 
 let sceneCameras = [];
 let selectedCameraId = null;
 let selectedWaypointIndex = null; // 'waypoints'カメラ選択時、どの点が編集対象か
 let nextSceneCameraId = 1;
 
+function _defaultBlockRange() {
+  const tps = (typeof allTimelines !== 'undefined' && allTimelines && allTimelines.ticksPerSecond) || 30;
+  const start = (typeof curTick === 'number') ? curTick : 0;
+  const maxTick = (timeline && timeline.frames.length) ? timeline.frames.length - 1 : start + tps * DEFAULT_BLOCK_SECONDS;
+  const end = Math.min(maxTick, start + Math.round(tps * DEFAULT_BLOCK_SECONDS));
+  return { start, end: Math.max(end, start + 1) };
+}
+
 function scAddStaticCamera(pos, yaw, pitch, fov) {
-  const cam = { id: nextSceneCameraId++, mode: 'static', pos: pos.slice(), yaw, pitch, fov };
+  const { start, end } = _defaultBlockRange();
+  const cam = { id: nextSceneCameraId++, mode: 'static', pos: pos.slice(), yaw, pitch, fov,
+                startTick: start, endTick: end, layer: 0 };
+  cam.layer = scFindFreeLayerFrom(0, cam.startTick, cam.endTick, cam.id);
   sceneCameras.push(cam);
   selectedCameraId = cam.id;
   selectedWaypointIndex = null;
@@ -332,7 +344,14 @@ function scAddStaticCamera(pos, yaw, pitch, fov) {
 
 // waypoints: [{pos,yaw,pitch,time}, ...] (作成済みの配列をそのまま持たせる)
 function scAddWaypointCamera(waypoints, fov) {
-  const cam = { id: nextSceneCameraId++, mode: 'waypoints', waypoints, fov };
+  const { start } = _defaultBlockRange();
+  const tps = (typeof allTimelines !== 'undefined' && allTimelines && allTimelines.ticksPerSecond) || 30;
+  const durationSeconds = waypoints[waypoints.length - 1].time || DEFAULT_BLOCK_SECONDS;
+  const maxTick = (timeline && timeline.frames.length) ? timeline.frames.length - 1 : start + tps * durationSeconds;
+  const end = Math.min(maxTick, start + Math.max(1, Math.round(tps * durationSeconds)));
+  const cam = { id: nextSceneCameraId++, mode: 'waypoints', waypoints, fov,
+                startTick: start, endTick: Math.max(end, start + 1), layer: 0 };
+  cam.layer = scFindFreeLayerFrom(0, cam.startTick, cam.endTick, cam.id);
   sceneCameras.push(cam);
   selectedCameraId = cam.id;
   selectedWaypointIndex = 0;
@@ -359,6 +378,42 @@ function scDeleteSelected() {
   sceneCameras = sceneCameras.filter(c => c.id !== selectedCameraId);
   selectedCameraId = null;
   selectedWaypointIndex = null;
+  scCompactLayers();
+}
+
+
+// ============================================================
+// タイムライン: 開始/終了tickの重なり判定・層(レイヤー)の自動割り当て
+// ============================================================
+
+function scRangesOverlap(aStart, aEnd, bStart, bEnd) {
+  return aStart < bEnd && bStart < aEnd;
+}
+
+// startLayerから昇順に、指定した時間範囲と重ならない最初の層を探す
+function scFindFreeLayerFrom(startLayer, startTick, endTick, excludeId) {
+  let layer = Math.max(0, startLayer);
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const conflict = sceneCameras.some(c =>
+      c.id !== excludeId && c.layer === layer && scRangesOverlap(c.startTick, c.endTick, startTick, endTick));
+    if (!conflict) return layer;
+    layer++;
+  }
+}
+
+// 使われている層番号を0からの連番に詰め直す(ドラッグでできた空の層を消す)
+function scCompactLayers() {
+  const used = [...new Set(sceneCameras.map(c => c.layer))].sort((a, b) => a - b);
+  const remap = new Map(used.map((l, i) => [l, i]));
+  for (const c of sceneCameras) c.layer = remap.get(c.layer);
+}
+
+// 指定tickの時点で表示されているべきカメラを、奥(layer小)→手前(layer大)の順で返す
+function scActiveCamerasAtTick(tick) {
+  return sceneCameras
+    .filter(c => tick >= c.startTick && tick < c.endTick)
+    .sort((a, b) => a.layer - b.layer);
 }
 
 // 全カメラの「点」を、選択用に平らなリストにする({camId, waypointIndex, pos})

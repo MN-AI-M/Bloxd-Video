@@ -333,8 +333,9 @@ function fcGetCameraVectors(yaw, pitch) {
 // ============================================================
 // シーンエディタ: 画面状態(主画面⇔小窓)・ギズモのドラッグ状態
 // ============================================================
-// 「編集用のWASD視点」と「選択中カメラのプレビュー」のどちらかが主画面、
-// もう片方が右下の小窓(PinP)になる。previewIsMainがどちらが主画面かを表す。
+// 「編集用のWASD視点」と「タイムラインの今の再生位置でのプレビュー」の
+// どちらかが主画面、もう片方が右下の小窓(PinP)になる。
+// previewIsMainがどちらが主画面かを表す。
 let previewIsMain = false;
 let dragState = null; // ギズモをドラッグ中の情報。ドラッグ中でなければnull
 
@@ -350,17 +351,18 @@ function _fcEditViewProj() {
   return { view, proj };
 }
 
-// 配置済みカメラ(sceneCameras の1つ)から見た、view/proj行列を作る。
-// 動くショットは、ループ再生するプレビュー時刻(previewTime)から
-// 現在位置・向きを補間して使う。
-function _camCurrentPose(cam) {
+// 配置済みカメラの、指定tickにおける view/proj 行列を作る。動くショットは、
+// 「そのブロックの先頭(startTick)からの経過秒数」でウェイポイント間を補間する
+// (タイムラインの再生位置=プレイヘッドがそのまま動くショットの進み具合になる)。
+function _camCurrentPose(cam, tick) {
   if (cam.mode === 'static') return { pos: cam.pos, yaw: cam.yaw, pitch: cam.pitch };
-  const duration = scWaypointCameraDuration(cam) || 1;
-  return scEvalWaypointCamera(cam, previewTime % duration);
+  const tps = (allTimelines && allTimelines.ticksPerSecond) || 30;
+  const localSeconds = (tick - cam.startTick) / tps;
+  return scEvalWaypointCamera(cam, localSeconds);
 }
 
-function _camViewProj(cam, aspect) {
-  const pose = _camCurrentPose(cam);
+function _camViewProj(cam, aspect, tick) {
+  const pose = _camCurrentPose(cam, tick);
   const proj = fcMat4Perspective(cam.fov * Math.PI / 180, aspect, 0.1, 3000);
   const { forward } = fcGetCameraVectors(pose.yaw, pose.pitch);
   const center = [pose.pos[0] + forward[0], pose.pos[1] + forward[1], pose.pos[2] + forward[2]];
@@ -368,11 +370,49 @@ function _camViewProj(cam, aspect) {
   return { view, proj };
 }
 
-let previewTime = 0; // 動くショットのプレビューをループ再生するための経過秒数
-
 function _fcCurTickVal() {
   if (timeline && timeline.frames.length && timeline.frames[curTick]) return timeline.frames[curTick].tick;
   return 0;
+}
+
+// タイムラインの今の再生位置(curTick)で有効な全カメラを、指定した矩形の中に
+// 合成して描く(1台だけなら矩形全体、複数ならPinPとして重ねて描く)。
+function computeSubRects(vx, vy, vw, vh, n) {
+  if (n <= 1) return [[vx, vy, vw, vh]];
+  const rects = [[vx, vy, vw, vh]];
+  const insetCount = n - 1;
+  const insetW = Math.max(24, Math.min(vw * 0.32, (vw - (insetCount + 1) * 6) / insetCount));
+  const insetH = insetW * (vh / vw);
+  for (let i = 0; i < insetCount; i++) {
+    const ix = vx + vw - (insetCount - i) * (insetW + 6);
+    const iy = vy + vh - insetH - 6;
+    rects.push([ix, iy, insetW, insetH]);
+  }
+  return rects;
+}
+
+function renderPreviewComposite(gl, vx, vy, vw, vh, tick) {
+  const active = scActiveCamerasAtTick(tick);
+  gl.enable(gl.SCISSOR_TEST);
+  if (active.length === 0) {
+    // 表示するカメラが無い区間は、空であることが分かるように暗く塗っておく
+    gl.scissor(vx, vy, vw, vh);
+    gl.clearColor(0.05, 0.05, 0.07, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.disable(gl.SCISSOR_TEST);
+    return;
+  }
+  const rects = computeSubRects(vx, vy, vw, vh, active.length);
+  active.forEach((cam, i) => {
+    const [rx, ry, rw, rh] = rects[i];
+    const { view, proj } = _camViewProj(cam, rw / rh, tick);
+    gl.scissor(rx, ry, rw, rh);
+    gl.clearColor(0.4, 0.63, 0.9, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    drawTerrainWithMatrices(view, proj, rx, ry, rw, rh);
+    renderHumanoids(gl, view, proj, tick);
+  });
+  gl.disable(gl.SCISSOR_TEST);
 }
 
 
@@ -380,10 +420,15 @@ function _fcCurTickVal() {
 // カメラの配置(自由飛行で行って、その場でスナップして固定)
 // ============================================================
 
+// timeline.jsが読み込まれていれば、ブロック一覧・編集パネルを再描画する
+function _refreshTimelineUI() {
+  if (typeof timelineRefresh === 'function') timelineRefresh();
+}
+
 // F: 今いる場所を「静的ショット」として即座に固定する
 function placeCameraHere() {
   scAddStaticCamera(fcPos, fcYaw, fcPitch, fcFovDeg);
-  updateSelectedCameraBox();
+  _refreshTimelineUI();
   updatePinPVisibility();
 }
 
@@ -397,7 +442,7 @@ function addWaypointHere() {
 function finishWaypointsHere() {
   const cam = scFinishInProgressWaypoints(fcFovDeg);
   if (cam) {
-    updateSelectedCameraBox();
+    _refreshTimelineUI();
     updatePinPVisibility();
   }
 }
@@ -504,7 +549,7 @@ function setupFreecamControls() {
     if ((e.code === 'Delete' || e.code === 'Backspace') && !flying && selectedCameraId != null && !e.repeat) {
       try {
         scDeleteSelected();
-        updateSelectedCameraBox();
+        _refreshTimelineUI();
         updatePinPVisibility();
         previewIsMain = false; // 表示中だったプレビューが消えた場合に備えて編集視点に戻す
       } catch (err) { console.error('削除に失敗しました:', err); }
@@ -531,7 +576,7 @@ function setupFreecamControls() {
       if (picked) {
         selectedCameraId = picked.camId;
         selectedWaypointIndex = picked.waypointIndex;
-        updateSelectedCameraBox();
+        _refreshTimelineUI();
         return;
       }
     } catch (err) {
@@ -575,62 +620,8 @@ function setupPinPInset() {
 function updatePinPVisibility() {
   document.getElementById('pinpInset').classList.toggle('show', sceneCameras.length > 0);
 }
-
-// 選択中カメラの情報ボックス(画角スライダー+動くショットならウェイポイント一覧)の表示を更新する
-function updateSelectedCameraBox() {
-  const box = document.getElementById('selectedCameraBox');
-  const sel = scGetSelected();
-  if (!sel) { box.classList.remove('show'); return; }
-  box.classList.add('show');
-
-  const fovSlider = document.getElementById('selectedCamFov');
-  fovSlider.value = sel.fov;
-  document.getElementById('selectedCamFovValue').innerText = Math.round(sel.fov) + '°';
-  fovSlider.oninput = () => {
-    sel.fov = parseInt(fovSlider.value);
-    document.getElementById('selectedCamFovValue').innerText = sel.fov + '°';
-  };
-
-  const listEl = document.getElementById('selectedCameraWaypointList');
-  listEl.innerHTML = '';
-  if (sel.mode !== 'waypoints') return;
-
-  sel.waypoints.forEach((wp, i) => {
-    const row = document.createElement('div');
-    row.className = 'waypointRow' + (i === selectedWaypointIndex ? ' active' : '');
-    const label = document.createElement('span');
-    label.innerText = `点${i + 1}`;
-    const timeInput = document.createElement('input');
-    timeInput.type = 'number';
-    timeInput.step = '0.1';
-    timeInput.min = i === 0 ? '0' : (sel.waypoints[i - 1].time + 0.1).toFixed(1);
-    timeInput.value = wp.time.toFixed(1);
-    const unit = document.createElement('span');
-    unit.innerText = '秒';
-
-    row.addEventListener('click', (e) => {
-      if (e.target === timeInput) return; // 数値欄のクリックでは選択を変えない
-      selectedCameraId = sel.id;
-      selectedWaypointIndex = i;
-      updateSelectedCameraBox();
-    });
-    timeInput.addEventListener('change', () => {
-      // 直前・直後のウェイポイントより手前/後ろへは動かせない(順序が崩れると補間が破綻するため)
-      const prevTime = i > 0 ? sel.waypoints[i - 1].time : -Infinity;
-      const nextTime = i < sel.waypoints.length - 1 ? sel.waypoints[i + 1].time : Infinity;
-      let v = parseFloat(timeInput.value);
-      if (isNaN(v)) v = wp.time;
-      v = Math.max(prevTime + 0.05, Math.min(nextTime - 0.05, v));
-      wp.time = v;
-      timeInput.value = v.toFixed(1);
-    });
-
-    row.appendChild(label);
-    row.appendChild(timeInput);
-    row.appendChild(unit);
-    listEl.appendChild(row);
-  });
-}
+// ⚠️ 選択中カメラの情報表示(画角・ウェイポイント一覧)は、ステップ4から
+// timeline.js の編集パネル(ブロックをダブルクリックで開く)に移った。
 
 
 // ============================================================
@@ -649,21 +640,19 @@ function fcUpdateStatus() {
 
 function renderFreecam() {
   if (!fcGl) return;
-  const sel = scGetSelected();
   const activePoint = scGetActivePoint();
   const hasCamera = sceneCameras.length > 0;
   const editVP = _fcEditViewProj();
+  const tick = curTick;
 
   // 主画面
   fcGl.viewport(0, 0, fcCanvas.width, fcCanvas.height);
   fcGl.clearColor(0.4, 0.63, 0.9, 1); // 空っぽい水色(単色描画より馴染むように)
   fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
 
-  if (previewIsMain && sel) {
-    // 主画面=選択中カメラのプレビュー(固定カメラなので、ギズモは出さない)
-    const { view, proj } = _camViewProj(sel, fcCanvas.width / fcCanvas.height);
-    drawTerrainWithMatrices(view, proj, 0, 0, fcCanvas.width, fcCanvas.height);
-    renderHumanoids(fcGl, view, proj, _fcCurTickVal());
+  if (previewIsMain) {
+    // 主画面=タイムラインの今の位置でのプレビュー(固定カメラなので、ギズモは出さない)
+    renderPreviewComposite(fcGl, 0, 0, fcCanvas.width, fcCanvas.height, tick);
   } else {
     // 主画面=編集用のWASD視点
     drawTerrainWithMatrices(editVP.view, editVP.proj, 0, 0, fcCanvas.width, fcCanvas.height);
@@ -679,19 +668,17 @@ function renderFreecam() {
   if (hasCamera) {
     const vx = fcCanvas.width - PINP_W - PINP_MARGIN;
     const vy = PINP_MARGIN; // WebGLのビューポートのyは下端起点
-    fcGl.enable(fcGl.SCISSOR_TEST);
-    fcGl.scissor(vx, vy, PINP_W, PINP_H);
-    fcGl.clearColor(0.4, 0.63, 0.9, 1);
-    fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
     if (previewIsMain) {
+      fcGl.enable(fcGl.SCISSOR_TEST);
+      fcGl.scissor(vx, vy, PINP_W, PINP_H);
+      fcGl.clearColor(0.4, 0.63, 0.9, 1);
+      fcGl.clear(fcGl.COLOR_BUFFER_BIT | fcGl.DEPTH_BUFFER_BIT);
       drawTerrainWithMatrices(editVP.view, editVP.proj, vx, vy, PINP_W, PINP_H);
       renderHumanoids(fcGl, editVP.view, editVP.proj, _fcCurTickVal());
-    } else if (sel) {
-      const { view, proj } = _camViewProj(sel, PINP_W / PINP_H);
-      drawTerrainWithMatrices(view, proj, vx, vy, PINP_W, PINP_H);
-      renderHumanoids(fcGl, view, proj, _fcCurTickVal());
+      fcGl.disable(fcGl.SCISSOR_TEST);
+    } else {
+      renderPreviewComposite(fcGl, vx, vy, PINP_W, PINP_H, tick);
     }
-    fcGl.disable(fcGl.SCISSOR_TEST);
   }
   fcGl.viewport(0, 0, fcCanvas.width, fcCanvas.height); // 次回のため元に戻しておく
 }
@@ -750,7 +737,6 @@ function freecamLoop(now) {
     if (fcKeys['ShiftLeft'] || fcKeys['ShiftRight']) move([0, 1, 0], -d);
   }
 
-  previewTime += dt;
   try {
     renderFreecam();
   } catch (err) {

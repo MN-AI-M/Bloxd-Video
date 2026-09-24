@@ -185,9 +185,12 @@ document.getElementById('processBtn').addEventListener('click', async () => {
         setupTransportControls();
         setupFovControl();
         await initFreecamOnce();
+        timelineInit(); // 🎥カメラトラックのUI配線(タイムラインのDOMが揃ってから)
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
-        // 再描画してるので、ここで明示的な再描画は不要)
+        // 再描画してるので、ここで明示的な再描画は不要)。
+        // タイムラインの幅だけは、ストリーミングで総tick数が伸びるたびに広げる。
+        if (typeof timelineRefresh === 'function') timelineRefresh();
       }
 
       if (partial.done) {
@@ -305,12 +308,7 @@ function setupTransportControls() {
   document.getElementById('playBtn').addEventListener('click', () => {
     if (playing) stopPlayback(); else startPlayback();
   });
-  const scrub = document.getElementById('scrubBar');
-  scrub.addEventListener('input', () => {
-    if (playing) stopPlayback();
-    curTick = parseInt(scrub.value);
-    updateScrubUI();
-  });
+  // 再生位置の変更(シーク)は、timeline.jsが#timelineScrollのクリック/ドラッグで行う。
 }
 
 function startPlayback() {
@@ -351,17 +349,15 @@ function playTick() {
   animId = requestAnimationFrame(playTick);
 }
 
-// freecamLoopから毎フレーム呼ばれる。スクラブバーと時刻表示を今のcurTickに揃える。
+// freecamLoopから毎フレーム呼ばれる。タイムラインの再生ヘッドと時刻表示を
+// 今のcurTickに揃える(ブロック自体の再描画は、追加・移動・削除の時だけでいい)。
 function updateScrubUI() {
   if (!timeline || !timeline.frames.length) return;
-  const scrub = document.getElementById('scrubBar');
   const maxAvailable = timeline.frames.length - 1;
-  if (parseInt(scrub.max) !== maxAvailable) scrub.max = maxAvailable;
-  if (parseInt(scrub.value) !== curTick) scrub.value = curTick;
-
   const tps = allTimelines.ticksPerSecond || 30;
   const cur = curTick / tps, total = maxAvailable / tps;
   document.getElementById('timecode').innerText = formatSeconds(cur) + ' / ' + formatSeconds(total);
+  if (typeof timelineUpdatePlayhead === 'function') timelineUpdatePlayhead();
 }
 
 function formatSeconds(seconds) {
