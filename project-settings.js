@@ -1,30 +1,45 @@
 // project-settings.js
 // ============================================================
 // プロジェクト設定(3Dではない、普通のフォーム画面)。
-// シーンエディタ(オービット視点の3D画面)とは完全に別物で、
-// 「このリプレイ編集ファイル全体に関わる設定」をここにまとめる。
+// シーンエディタとは完全に別物で、「このリプレイ編集ファイル全体に関わる
+// 設定」をここにまとめる。
 //
 // 左にカテゴリのナビ(#settingsNav)、右に選択中カテゴリの中身
-// (#settingsModalBody)を出す「設定ページ」の形にしてある。
-// 今後、機能が増えるたびに SETTINGS_SECTIONS へ1項目足すだけで済むように
-// (以前のように#settingsModalBodyへ直接フィールドを積み増していく形だと、
-//  項目が増えるほど1画面が縦に伸び続けて破綻するため)。
+// (#settingsModalBody)を出す「設定ページ」の形にしてある。今後、機能が
+// 増えるたびに SETTINGS_SECTIONS へ1項目足すだけで済むように
+// (1画面にフィールドを積み増していく形だと、項目が増えるほど縦に伸び
+//  続けて破綻するため)。
 //
-// 今のところ入ってるカテゴリ: プレイヤー(3Dシーン内の人物モデルに貼る
-// テクスチャ画像)。将来的には、コミュニティサイトで公開されたテクスチャを
-// ここからインポートできるようにする構想もある(今回はローカルの画像
-// アップロードのみ)。
+// 今のところ入ってるカテゴリ:
+//   🧍プレイヤー: 3Dシーン内の人物モデルに貼るテクスチャ画像
+//   💾書き出し: 書き出す動画の画質(ビットレート)・解像度
+//     (実際の書き出し処理=MediaRecorderまわりは後続ステップで実装する。
+//      ここではその時に使う設定値を持っておくだけ)
 // ============================================================
 
 const SETTINGS_SECTIONS = [
   { id: 'player', label: 'プレイヤー', icon: '🧍', render: renderPlayerSection },
+  { id: 'export', label: '書き出し', icon: '💾', render: renderExportSection },
   // 今後ここに追加していく想定。例:
-  // { id: 'export',    label: '書き出し',       icon: '💾', render: renderExportSection },
   // { id: 'community', label: 'コミュニティ連携', icon: '🌐', render: renderCommunitySection },
 ];
 
 let activeSettingsSectionId = SETTINGS_SECTIONS[0].id;
 let currentPlayerTextureUrl = null; // プレビュー表示用(再描画のたびに読み直さなくていいよう保持)
+
+// 書き出し設定(ステップ8の書き出し処理が参照する)
+const EXPORT_QUALITY_PRESETS = {
+  standard: { label: '標準', bitsPerSecond: 4_000_000 },
+  high:     { label: '高画質', bitsPerSecond: 8_000_000 },
+  highest:  { label: '最高画質', bitsPerSecond: 16_000_000 },
+};
+const EXPORT_RESOLUTION_PRESETS = {
+  original: { label: '編集画面と同じ', size: null }, // null = 書き出し時のキャンバスサイズをそのまま使う
+  hd720:    { label: '1280×720', size: [1280, 720] },
+  hd1080:   { label: '1920×1080', size: [1920, 1080] },
+};
+let exportQualityId = 'high';
+let exportResolutionId = 'original';
 
 
 // ============================================================
@@ -52,13 +67,7 @@ function renderSettingsNav() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'settingsNavItem' + (section.id === activeSettingsSectionId ? ' active' : '');
-    const icon = document.createElement('span');
-    icon.className = 'navIcon';
-    icon.innerText = section.icon;
-    const label = document.createElement('span');
-    label.innerText = section.label;
-    btn.appendChild(icon);
-    btn.appendChild(label);
+    btn.innerText = section.icon + ' ' + section.label;
     btn.onclick = () => {
       if (activeSettingsSectionId === section.id) return;
       activeSettingsSectionId = section.id;
@@ -114,30 +123,26 @@ function renderPlayerSection(body) {
 
   const actions = document.createElement('div');
   actions.id = 'playerTexturePreviewActions';
+  actions.style.display = 'flex';
+  actions.style.gap = '8px';
 
   const fileInput = document.createElement('input');
   fileInput.type = 'file';
-  fileInput.id = 'playerTextureInput';
   fileInput.accept = 'image/*';
   fileInput.style.display = 'none';
 
   const chooseBtn = document.createElement('button');
-  chooseBtn.id = 'playerTextureChooseBtn';
   chooseBtn.className = 'btn btn-ghost btn-sm';
   chooseBtn.innerText = '画像を選ぶ';
   chooseBtn.onclick = () => fileInput.click();
 
   const clearBtn = document.createElement('button');
-  clearBtn.id = 'playerTextureClearBtn';
   clearBtn.className = 'btn btn-ghost btn-sm';
   clearBtn.disabled = !currentPlayerTextureUrl;
   clearBtn.innerText = 'クリア';
   clearBtn.onclick = () => {
-    if (typeof setPlayerTexture === 'function' && fcGl) {
-      setPlayerTexture(fcGl, null);
-    }
+    if (typeof setPlayerTexture === 'function' && fcGl) setPlayerTexture(fcGl, null);
     currentPlayerTextureUrl = null;
-    // 今表示中のカテゴリがまだ「プレイヤー」のままなら再描画して即反映する
     if (activeSettingsSectionId === 'player') renderSettingsBody();
   };
 
@@ -147,15 +152,11 @@ function renderPlayerSection(body) {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
-      if (typeof setPlayerTexture === 'function' && fcGl) {
-        setPlayerTexture(fcGl, img);
-      }
+      if (typeof setPlayerTexture === 'function' && fcGl) setPlayerTexture(fcGl, img);
       currentPlayerTextureUrl = url;
       if (activeSettingsSectionId === 'player') renderSettingsBody();
     };
-    img.onerror = () => {
-      alert('この画像を読み込めませんでした。別の画像でお試しください。');
-    };
+    img.onerror = () => alert('この画像を読み込めませんでした。別の画像でお試しください。');
     img.src = url;
   };
 
@@ -167,4 +168,54 @@ function renderPlayerSection(body) {
   previewRow.appendChild(actions);
   fieldRow.appendChild(previewRow);
   body.appendChild(fieldRow);
+}
+
+
+// ============================================================
+// 「書き出し」カテゴリ: 画質(ビットレート)・解像度
+// どちらもピル形のボタンで選ぶ(値そのものはexportQualityId/
+// exportResolutionIdに保持し、後続ステップの書き出し処理から参照する)。
+// ============================================================
+
+function renderExportSection(body) {
+  body.appendChild(_buildPillField(
+    '画質', 'panelHint', 'ビットレートに反映されます。高いほどきれいですが、ファイルサイズも大きくなります。',
+    EXPORT_QUALITY_PRESETS, exportQualityId, (id) => { exportQualityId = id; }
+  ));
+  body.appendChild(_buildPillField(
+    '解像度', 'panelHint', '書き出す動画の出力サイズです。',
+    EXPORT_RESOLUTION_PRESETS, exportResolutionId, (id) => { exportResolutionId = id; }
+  ));
+}
+
+function _buildPillField(labelText, hintClass, hintText, presets, currentId, onSelect) {
+  const fieldRow = document.createElement('div');
+  fieldRow.className = 'fieldRow';
+
+  const label = document.createElement('label');
+  label.innerText = labelText;
+  fieldRow.appendChild(label);
+
+  const hint = document.createElement('div');
+  hint.className = hintClass;
+  hint.innerText = hintText;
+  fieldRow.appendChild(hint);
+
+  const group = document.createElement('div');
+  group.className = 'settingsRadioGroup';
+  group.style.marginTop = '8px';
+
+  for (const [id, preset] of Object.entries(presets)) {
+    const pill = document.createElement('button');
+    pill.type = 'button';
+    pill.className = 'settingsRadioPill' + (id === currentId ? ' active' : '');
+    pill.innerText = preset.label;
+    pill.onclick = () => {
+      onSelect(id);
+      renderSettingsBody(); // active表示を揃えるため、セクション全体を再描画する
+    };
+    group.appendChild(pill);
+  }
+  fieldRow.appendChild(group);
+  return fieldRow;
 }

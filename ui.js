@@ -186,6 +186,7 @@ document.getElementById('processBtn').addEventListener('click', async () => {
         setupFovControl();
         await initFreecamOnce();
         timelineInit(); // 🎥カメラトラックのUI配線(タイムラインのDOMが揃ってから)
+        setupProjectSettingsModal(); // ⚙プロジェクト設定の配線
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
         // 再描画してるので、ここで明示的な再描画は不要)。

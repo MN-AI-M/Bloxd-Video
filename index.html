@@ -150,6 +150,44 @@
   #editPanelBody .fieldRow label { font-size:12.5px; color: var(--muted); min-width:72px; }
   #editPanelWaypointList { display:flex; flex-direction:column; gap:4px; margin-top:8px; }
 
+  /* ============================================================
+     プロジェクト設定(セクション制: 左ナビ+右コンテンツ)
+     ============================================================ */
+  #settingsModal { position:fixed; inset:0; z-index:20; display:none; align-items:center; justify-content:center;
+                    background:rgba(5,6,9,0.6); backdrop-filter: blur(2px); }
+  #settingsModal.open { display:flex; }
+  #settingsModalBox { width:680px; max-width:calc(100vw - 40px); height:460px; max-height:calc(100vh - 80px);
+                       background: var(--surface); border:1px solid var(--border); border-radius: var(--radius);
+                       display:flex; flex-direction:column; box-shadow: 0 16px 48px rgba(0,0,0,0.5); overflow:hidden; }
+  #settingsModalHeader { display:flex; align-items:center; justify-content:space-between; padding:18px 20px;
+                          border-bottom:1px solid var(--border); flex-shrink:0; }
+  #settingsModalHeader h2 { font-family: var(--font-display); font-size:16px; margin:0; }
+  #settingsModalClose { background:none; border:none; color: var(--muted); font-size:18px; cursor:pointer; line-height:1; padding:4px; }
+  #settingsModalClose:hover { color: var(--ink); }
+
+  #settingsModalMain { flex:1; min-height:0; display:flex; }
+  #settingsNav { width:168px; flex-shrink:0; border-right:1px solid var(--border); padding:12px;
+                 display:flex; flex-direction:column; gap:2px; overflow-y:auto; }
+  .settingsNavItem { display:flex; align-items:center; gap:9px; width:100%; padding:9px 10px; border:none;
+                      border-radius:7px; background:transparent; color: var(--muted); font-family: var(--font-ui);
+                      font-size:13.5px; text-align:left; cursor:pointer; }
+  .settingsNavItem:hover { background: var(--surface-2); color: var(--ink); }
+  .settingsNavItem.active { background: var(--surface-2); color: var(--ink); font-weight:700; }
+
+  #settingsModalBody { flex:1; min-width:0; padding:20px; overflow-y:auto; display:flex; flex-direction:column; gap:16px; }
+  .settingsSectionTitle { font-family: var(--font-display); font-size:14px; font-weight:700; margin:0 0 4px; }
+  .panelHint { font-size:12px; color: var(--muted); }
+  #playerTexturePreviewRow { display:flex; align-items:center; gap:14px; margin-top:8px; }
+  #playerTexturePreview { width:56px; height:56px; border-radius:8px; background: var(--surface-2);
+                           display:flex; align-items:center; justify-content:center; font-size:11px; color: var(--muted);
+                           overflow:hidden; flex-shrink:0; }
+  #playerTexturePreview img { width:100%; height:100%; object-fit:cover; }
+  .settingsRadioGroup { display:flex; gap:8px; flex-wrap:wrap; }
+  .settingsRadioPill { padding:8px 14px; border-radius:8px; border:1px solid var(--border); background:transparent;
+                        color: var(--muted); font-size:12.5px; cursor:pointer; }
+  .settingsRadioPill:hover { border-color: var(--muted); }
+  .settingsRadioPill.active { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); font-weight:700; }
+
 </style>
 </head>
 <body>
@@ -200,6 +238,7 @@
     <div id="topRightControls">
       <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
       <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
+      <button id="projectSettingsBtn" class="btn btn-ghost btn-sm">⚙ 設定</button>
     </div>
     <div id="pinpInset" title="クリックで主画面と入れ替え"></div>
     <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Fでこの場所にカメラを固定 / Gでウェイポイント追加・Enterで確定 / Escでマウス解放してギズモを操作</div>
@@ -230,8 +269,24 @@
   <div id="editPanelBody"></div>
 </div>
 
-<!-- ⚠️ 現時点ではまだ content-blocks.js / project-settings.js は
-     読み込んでいない(ステップ5以降で追加予定)。今読んでも動かないため。 -->
+<!-- プロジェクト全体の設定(3Dではない、普通のフォーム画面)。
+     左のカテゴリ一覧(#settingsNav)+右の中身(#settingsModalBody)という
+     「設定ページ」の形。中身はどちらもproject-settings.jsが動的に組み立てる。
+     今後、機能が増えるたびにSETTINGS_SECTIONSにカテゴリを1つ足すだけで済む。 -->
+<div id="settingsModal">
+  <div id="settingsModalBox">
+    <div id="settingsModalHeader">
+      <h2>プロジェクト設定</h2>
+      <button id="settingsModalClose">✕</button>
+    </div>
+    <div id="settingsModalMain">
+      <nav id="settingsNav"></nav>
+      <div id="settingsModalBody"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ⚠️ 現時点ではまだ content-blocks.js は読み込んでいない(ステップ6以降で追加予定)。 -->
 
 <!-- Pyodide(ブラウザ内でPythonを動かす仕組み)は、メインスレッドを止めない
      よう別スレッド(pyodide-worker.js、Web Worker)の中で読み込む。
@@ -244,11 +299,13 @@
 <!-- 共有の状態・定数は shared.js、シーンエディタの3D(人物モデル・
      カメラギズモ・移動/回転ギズモ)は entities3d.js、地形描画・自由カメラ・
      画面の主/小窓切り替えは freecam.js、🎥カメラトラックのタイムラインUIと
-     編集パネルは timeline.js、UI(アップロード・Pyodide呼び出し・再生)は ui.js -->
+     編集パネルは timeline.js、プロジェクト設定(テクスチャ・書き出し画質)は
+     project-settings.js、UI(アップロード・Pyodide呼び出し・再生)は ui.js -->
 <script src="shared.js"></script>
 <script src="entities3d.js"></script>
 <script src="freecam.js"></script>
 <script src="timeline.js"></script>
+<script src="project-settings.js"></script>
 <script src="ui.js"></script>
 </body>
 </html>
