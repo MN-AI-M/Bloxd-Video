@@ -1,16 +1,13 @@
 // entities3d.js
 // ============================================================
-// シーンエディタ用の、地形以外の3Dオブジェクト:
+// シーンエディタ用の、地形以外の3Dオブジェクトとカメラのデータ:
 //   - 人物モデル(灰色マネキン。プレイヤーテクスチャがあれば貼る)
-//   - カメラギズモ(配置済みカメラの位置を表す小さい箱+レンズ)
-//   - 移動ギズモ(XYZ矢印+XZ平面ハンドル)・回転ギズモ(yaw/pitchリング)
-//     …選択中のカメラにだけ表示され、ドラッグで位置・向きを調整する
-//
-// 【作り直し・ステップ2(シーンエディタ)】
-// 移動・回転ギズモは、時間の都合上「線(LINE)」で描く簡易版にしてある
-// (太い立体矢印ではなく、色付きの線でできた矢印・リング)。当たり判定も
-// 画面上の座標に投影した上での「線分までの距離」で行っている。見た目の
-// 情報量としては簡易だが、位置・向きの調整という役割は問題なく果たせる。
+//   - カメラ(🎥カメラトラックのブロック)のデータ。キーフレーム方式で、
+//     キー1個=静的ショット、2個以上=動くショット(スプライン補間)
+//   - カメラの描画(キーごとの箱・軌道・再生ヘッド時刻の視野枠)
+//   - 移動ギズモ(XYZ矢印+XZ平面ハンドル)・回転ギズモ(左右/上下リング)
+//     …選択中のキーにだけ表示。画面上で常に同じ大きさに見えるよう
+//     距離に応じて拡大縮小し、マウスが乗った部分は光らせる。
 // ============================================================
 
 // 人物モデルのパーツ定義(ローカル座標。足元がy=0、yaw=0で+z方向を向く)。
@@ -308,77 +305,174 @@ function nearestFrameAtOrBefore(frames, tick) {
 
 
 // ============================================================
-// 配置済みカメラ(シーンエディタで置いたもの)= 🎥カメラトラックのブロック。
+// 配置済みカメラ = 🎥カメラトラックのブロック(キーフレーム方式)
 //
-// 静的ショット: { id, mode:'static', pos, yaw, pitch, fov, startTick, endTick, layer }
-// 動くショット: { id, mode:'waypoints', waypoints:[{pos,yaw,pitch,time}], fov, startTick, endTick, layer }
-//   waypointsは「秒」の昇順。timeは「ブロックの先頭(startTick)からの経過秒数」。
-//   layerは0が一番奥(背景)、大きいほど手前(PinP合成時に前面に出る)。
+// { id, kind:'camera', name, keys:[{time,pos,yaw,pitch}], fov, startTick, endTick, layer }
+//   keys: 「ブロックの先頭(startTick)からの秒数」ごとのカメラ位置・向き。
+//         1個なら静的ショット、2個以上なら動くショット(間をスプライン補間)。
+//         常にtimeの昇順に並べておく。ブロック左端を詰めた(トリム)時に
+//         負の時刻になることもある(評価時は端の値にクランプする)。
+//   layer: 0が一番奥(背景)、大きいほど手前(PinP合成時に前面に出る)。
+//
+// ここはデータの操作だけを持つ。選択状態の切り替え・Undo・画面更新は
+// editor-core.js が担当する(選択中のIDの変数だけは描画でも使うのでここに置く)。
 // ============================================================
 
-const DEFAULT_BLOCK_SECONDS = 3;
+const DEFAULT_BLOCK_SECONDS = 3;   // 新しいカメラの長さ
+const NEXT_POINT_GAP_SECONDS = 2;  // 「次のポイント(G)」で追加するキーの間隔
+const KEY_SNAP_SECONDS = 0.1;      // この差以内に既存キーがあれば、新規ではなく上書きにする
 
 let sceneCameras = [];
 let selectedCameraId = null;
-let selectedWaypointIndex = null; // 'waypoints'カメラ選択時、どの点が編集対象か
+let selectedKeyIndex = null;       // 選択中カメラのどのキーがギズモの操作対象か
+let selectedKeyExplicit = false;   // ◆やギズモを直接クリックして選んだキーか(Deleteでキーだけ消すか判断に使う)
 let nextSceneCameraId = 1;
 
-function _defaultBlockRange() {
-  const tps = (typeof allTimelines !== 'undefined' && allTimelines && allTimelines.ticksPerSecond) || 30;
-  const start = (typeof curTick === 'number') ? curTick : 0;
-  const maxTick = (timeline && timeline.frames.length) ? timeline.frames.length - 1 : start + tps * DEFAULT_BLOCK_SECONDS;
-  const end = Math.min(maxTick, start + Math.round(tps * DEFAULT_BLOCK_SECONDS));
-  return { start, end: Math.max(end, start + 1) };
+function scTps() {
+  return (typeof allTimelines !== 'undefined' && allTimelines && allTimelines.ticksPerSecond) || 30;
+}
+function scMaxTick() {
+  return (timeline && timeline.frames && timeline.frames.length) ? timeline.frames.length - 1 : 0;
 }
 
-function scAddStaticCamera(pos, yaw, pitch, fov) {
-  const { start, end } = _defaultBlockRange();
-  const cam = { id: nextSceneCameraId++, mode: 'static', pos: pos.slice(), yaw, pitch, fov,
-                startTick: start, endTick: end, layer: 0 };
+function _clonePose(p) { return { pos: p.pos.slice(), yaw: p.yaw, pitch: p.pitch }; }
+
+function scCamIsStatic(cam) { return cam.keys.length <= 1; }
+function scKeyAbsTick(cam, key) { return cam.startTick + key.time * scTps(); }
+function scCamLocalSeconds(cam, tick) { return (tick - cam.startTick) / scTps(); }
+function scCamName(cam) { return cam.name || ('カメラ' + cam.id); }
+
+function scCreateCamera(pose, fov, startTick) {
+  const tps = scTps();
+  const maxTick = scMaxTick();
+  let start = Math.max(0, Math.round(startTick));
+  if (maxTick > 0) start = Math.min(start, Math.max(0, maxTick - 1));
+  let end = start + Math.round(tps * DEFAULT_BLOCK_SECONDS);
+  if (maxTick > 0) end = Math.min(end, maxTick);
+  const id = nextSceneCameraId++;
+  const cam = {
+    id, kind: 'camera', name: 'カメラ' + id,
+    keys: [{ time: 0, ..._clonePose(pose) }],
+    fov, startTick: start, endTick: Math.max(end, start + 1), layer: 0,
+  };
   cam.layer = scFindFreeLayerFrom(0, cam.startTick, cam.endTick, cam.id);
   sceneCameras.push(cam);
-  selectedCameraId = cam.id;
-  selectedWaypointIndex = null;
   return cam;
 }
 
-// waypoints: [{pos,yaw,pitch,time}, ...] (作成済みの配列をそのまま持たせる)
-function scAddWaypointCamera(waypoints, fov) {
-  const { start } = _defaultBlockRange();
-  const tps = (typeof allTimelines !== 'undefined' && allTimelines && allTimelines.ticksPerSecond) || 30;
-  const durationSeconds = waypoints[waypoints.length - 1].time || DEFAULT_BLOCK_SECONDS;
-  const maxTick = (timeline && timeline.frames.length) ? timeline.frames.length - 1 : start + tps * durationSeconds;
-  const end = Math.min(maxTick, start + Math.max(1, Math.round(tps * durationSeconds)));
-  const cam = { id: nextSceneCameraId++, mode: 'waypoints', waypoints, fov,
-                startTick: start, endTick: Math.max(end, start + 1), layer: 0 };
-  cam.layer = scFindFreeLayerFrom(0, cam.startTick, cam.endTick, cam.id);
-  sceneCameras.push(cam);
-  selectedCameraId = cam.id;
-  selectedWaypointIndex = 0;
-  return cam;
-}
+function scGetCamera(id) { return sceneCameras.find(c => c.id === id) || null; }
+function scGetSelected() { return scGetCamera(selectedCameraId); }
 
-function scGetSelected() {
-  return sceneCameras.find(c => c.id === selectedCameraId) || null;
-}
-
-// 今ギズモをドラッグする対象になる「点」(pos/yaw/pitchを持つオブジェクト)。
-// 静的ショットはカメラ自身、動くショットは選択中のウェイポイントを返す。
-// 返り値をそのまま書き換えれば、元のデータにも反映される(参照を返している)。
+// 今ギズモで動かす対象のキー(pos/yaw/pitchを持つオブジェクトそのもの)
 function scGetActivePoint() {
   const cam = scGetSelected();
-  if (!cam) return null;
-  if (cam.mode === 'static') return cam;
-  if (cam.mode === 'waypoints' && selectedWaypointIndex != null) return cam.waypoints[selectedWaypointIndex] || null;
-  return null;
+  if (!cam || !cam.keys.length) return null;
+  const i = (selectedKeyIndex == null) ? 0 : Math.max(0, Math.min(cam.keys.length - 1, selectedKeyIndex));
+  return cam.keys[i];
 }
 
-function scDeleteSelected() {
-  if (selectedCameraId == null) return;
-  sceneCameras = sceneCameras.filter(c => c.id !== selectedCameraId);
-  selectedCameraId = null;
-  selectedWaypointIndex = null;
+// 再生ヘッドに一番近いキーの番号
+function scNearestKeyIndex(cam, tick) {
+  const s = scCamLocalSeconds(cam, tick);
+  let best = 0, bestD = Infinity;
+  cam.keys.forEach((k, i) => { const d = Math.abs(k.time - s); if (d < bestD) { bestD = d; best = i; } });
+  return best;
+}
+
+function scSortKeys(cam) { cam.keys.sort((a, b) => a.time - b.time); }
+
+// ブロックの範囲に、指定した絶対tickが入るよう伸ばす(キーの絶対時刻は保つ)
+function _extendCamToInclude(cam, absTick) {
+  const maxTick = scMaxTick();
+  const t = Math.max(0, maxTick > 0 ? Math.min(maxTick, absTick) : absTick);
+  if (t < cam.startTick) {
+    const shiftSec = (cam.startTick - t) / scTps();
+    for (const k of cam.keys) k.time += shiftSec;
+    cam.startTick = t;
+  }
+  if (t >= cam.endTick) cam.endTick = Math.min(maxTick > 0 ? maxTick : t + 1, t + 1);
+}
+
+// 指定した秒数(ブロック先頭からの)にキーを記録する。近くに既存キーがあれば上書き。
+// 戻り値: { index, created }
+function scSetKeyAt(cam, seconds, pose) {
+  const existing = cam.keys.findIndex(k => Math.abs(k.time - seconds) <= KEY_SNAP_SECONDS);
+  if (existing >= 0) {
+    const k = cam.keys[existing];
+    k.pos = pose.pos.slice(); k.yaw = pose.yaw; k.pitch = pose.pitch;
+    return { index: existing, created: false };
+  }
+  const key = { time: seconds, ..._clonePose(pose) };
+  cam.keys.push(key);
+  scSortKeys(cam);
+  _extendCamToInclude(cam, cam.startTick + seconds * scTps());
+  return { index: cam.keys.indexOf(key), created: true };
+}
+
+// 最後のキーの gapSeconds 後に、キーを1つ継ぎ足す(ブロックも必要なら伸ばす)
+function scAppendKey(cam, pose, gapSeconds) {
+  const last = cam.keys[cam.keys.length - 1];
+  const time = (last ? last.time : 0) + (gapSeconds || NEXT_POINT_GAP_SECONDS);
+  const key = { time, ..._clonePose(pose) };
+  cam.keys.push(key);
+  scSortKeys(cam);
+  _extendCamToInclude(cam, cam.startTick + time * scTps());
+  return cam.keys.indexOf(key);
+}
+
+function scDeleteKey(cam, index) {
+  if (cam.keys.length <= 1) return false;
+  cam.keys.splice(index, 1);
+  return true;
+}
+
+function scDeleteCamera(id) {
+  sceneCameras = sceneCameras.filter(c => c.id !== id);
   scCompactLayers();
+}
+
+// 再生ヘッドの位置でブロックを2つに割る(切れ目では同じ構図が続くようにする)
+function scSplitCamera(cam, tick) {
+  if (tick <= cam.startTick || tick >= cam.endTick) return null;
+  const s = scCamLocalSeconds(cam, tick);
+  const pose = scEvalCamera(cam, s);
+  const id = nextSceneCameraId++;
+  let leftKeys, rightKeys;
+  if (scCamIsStatic(cam)) {
+    leftKeys = cam.keys.map(k => ({ ...k, pos: k.pos.slice() }));
+    rightKeys = cam.keys.map(k => ({ ...k, time: 0, pos: k.pos.slice() }));
+  } else {
+    const eps = 0.02;
+    leftKeys = cam.keys.filter(k => k.time < s - eps).map(k => ({ ...k, pos: k.pos.slice() }));
+    leftKeys.push({ time: s, ..._clonePose(pose) });
+    rightKeys = [{ time: 0, ..._clonePose(pose) }];
+    for (const k of cam.keys) if (k.time > s + eps) rightKeys.push({ ...k, time: k.time - s, pos: k.pos.slice() });
+  }
+  const right = {
+    id, kind: 'camera', name: 'カメラ' + id, keys: rightKeys, fov: cam.fov,
+    startTick: tick, endTick: cam.endTick, layer: cam.layer,
+  };
+  cam.keys = leftKeys;
+  cam.endTick = tick;
+  sceneCameras.push(right);
+  return right;
+}
+
+// すぐ後ろに複製を置く
+function scDuplicateCamera(cam) {
+  const len = cam.endTick - cam.startTick;
+  const maxTick = scMaxTick();
+  let start = cam.endTick;
+  if (maxTick > 0 && start + len > maxTick) start = Math.max(0, maxTick - len);
+  const id = nextSceneCameraId++;
+  const dup = {
+    id, kind: 'camera', name: 'カメラ' + id,
+    keys: cam.keys.map(k => ({ ...k, pos: k.pos.slice() })),
+    fov: cam.fov, startTick: start, endTick: start + len, layer: cam.layer,
+  };
+  dup.layer = scFindFreeLayerFrom(cam.layer, dup.startTick, dup.endTick, dup.id);
+  sceneCameras.push(dup);
+  return dup;
 }
 
 
@@ -393,8 +487,7 @@ function scRangesOverlap(aStart, aEnd, bStart, bEnd) {
 // startLayerから昇順に、指定した時間範囲と重ならない最初の層を探す
 function scFindFreeLayerFrom(startLayer, startTick, endTick, excludeId) {
   let layer = Math.max(0, startLayer);
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+  for (;;) {
     const conflict = sceneCameras.some(c =>
       c.id !== excludeId && c.layer === layer && scRangesOverlap(c.startTick, c.endTick, startTick, endTick));
     if (!conflict) return layer;
@@ -416,48 +509,18 @@ function scActiveCamerasAtTick(tick) {
     .sort((a, b) => a.layer - b.layer);
 }
 
-// 全カメラの「点」を、選択用に平らなリストにする({camId, waypointIndex, pos})
+// 全カメラのキーを、クリック選択用に平らなリストにする
 function scAllPoints() {
   const out = [];
   for (const cam of sceneCameras) {
-    if (cam.mode === 'static') {
-      out.push({ camId: cam.id, waypointIndex: null, pos: cam.pos });
-    } else {
-      cam.waypoints.forEach((wp, i) => out.push({ camId: cam.id, waypointIndex: i, pos: wp.pos }));
-    }
+    cam.keys.forEach((k, i) => out.push({ camId: cam.id, keyIndex: i, pos: k.pos, yaw: k.yaw, pitch: k.pitch }));
   }
   return out;
 }
 
 
 // ============================================================
-// ウェイポイントの作成中(自由飛行でG=追加、Enter=完了)
-// ============================================================
-
-let inProgressWaypoints = null; // 作成中のみ配列。それ以外はnull
-let inProgressStartTime = 0;    // performance.now()、経過秒数の基準
-
-function scAddInProgressWaypoint(pos, yaw, pitch, nowMs) {
-  if (!inProgressWaypoints) {
-    inProgressWaypoints = [];
-    inProgressStartTime = nowMs;
-  }
-  const time = (nowMs - inProgressStartTime) / 1000;
-  inProgressWaypoints.push({ pos: pos.slice(), yaw, pitch, time });
-}
-
-// 完了させて、正式なカメラ(sceneCameras)にする。2点未満なら何もしない。
-function scFinishInProgressWaypoints(fov) {
-  if (!inProgressWaypoints || inProgressWaypoints.length < 2) { inProgressWaypoints = null; return null; }
-  const cam = scAddWaypointCamera(inProgressWaypoints, fov);
-  inProgressWaypoints = null;
-  return cam;
-}
-
-
-// ============================================================
-// スプライン補間(Catmull-Rom)。動くショットの、ウェイポイント間の
-// なめらかな軌道を作る。
+// スプライン補間(Catmull-Rom)。動くショットの、キー間のなめらかな軌道。
 // ============================================================
 
 function catmullRom1D(p0, p1, p2, p3, t) {
@@ -472,41 +535,33 @@ function catmullRomPos(positions, i, t) {
   return [0, 1, 2].map(k => catmullRom1D(p0[k], p1[k], p2[k], p3[k], t));
 }
 
-// 指定した時刻(秒)における位置・向きを、ウェイポイント間の補間で求める。
-// 範囲外の時刻は端の値にクランプする。
-function scEvalWaypointCamera(cam, time) {
-  const wps = cam.waypoints;
-  if (wps.length === 1) return { pos: wps[0].pos, yaw: wps[0].yaw, pitch: wps[0].pitch };
-  if (time <= wps[0].time) return { pos: wps[0].pos, yaw: wps[0].yaw, pitch: wps[0].pitch };
-  const last = wps[wps.length - 1];
-  if (time >= last.time) return { pos: last.pos, yaw: last.yaw, pitch: last.pitch };
+// 指定した秒数(ブロック先頭から)における位置・向き。範囲外は端のキーにクランプ。
+function scEvalCamera(cam, time) {
+  const ks = cam.keys;
+  const first = ks[0], last = ks[ks.length - 1];
+  if (ks.length === 1 || time <= first.time) return _clonePose(first);
+  if (time >= last.time) return _clonePose(last);
 
   let i = 0;
-  while (i < wps.length - 2 && time > wps[i + 1].time) i++;
-  const a = wps[i], b = wps[i + 1];
+  while (i < ks.length - 2 && time > ks[i + 1].time) i++;
+  const a = ks[i], b = ks[i + 1];
   const span = (b.time - a.time) || 1;
   const t = Math.max(0, Math.min(1, (time - a.time) / span));
 
-  const positions = wps.map(w => w.pos);
-  const pos = catmullRomPos(positions, i, t);
+  const pos = catmullRomPos(ks.map(k => k.pos), i, t);
   const dyaw = Math.atan2(Math.sin(b.yaw - a.yaw), Math.cos(b.yaw - a.yaw)); // 最短経路で回る
-  const yaw = a.yaw + dyaw * t;
-  const pitch = a.pitch + (b.pitch - a.pitch) * t;
-  return { pos, yaw, pitch };
+  return { pos, yaw: a.yaw + dyaw * t, pitch: a.pitch + (b.pitch - a.pitch) * t };
 }
 
-function scWaypointCameraDuration(cam) {
-  if (!cam.waypoints.length) return 0;
-  return cam.waypoints[cam.waypoints.length - 1].time;
-}
+function scPoseAtTick(cam, tick) { return scEvalCamera(cam, scCamLocalSeconds(cam, tick)); }
 
-// 軌道を描画用にN点サンプリングする(実際の秒数とは無関係、見た目のガイド線用)
-function scSampleWaypointCurve(cam, samplesPerSegment) {
-  const wps = cam.waypoints;
-  if (wps.length < 2) return wps.length === 1 ? [wps[0].pos] : [];
-  const positions = wps.map(w => w.pos);
+// 軌道を描画用にサンプリングする(見た目のガイド線用)
+function scSampleCameraCurve(cam, samplesPerSegment) {
+  const ks = cam.keys;
+  if (ks.length < 2) return [];
+  const positions = ks.map(k => k.pos);
   const pts = [];
-  for (let i = 0; i < wps.length - 1; i++) {
+  for (let i = 0; i < ks.length - 1; i++) {
     for (let s = 0; s <= samplesPerSegment; s++) {
       if (i > 0 && s === 0) continue; // 継ぎ目の重複を避ける
       pts.push(catmullRomPos(positions, i, s / samplesPerSegment));
@@ -517,56 +572,42 @@ function scSampleWaypointCurve(cam, samplesPerSegment) {
 
 
 // ============================================================
-// 描画: カメラギズモ(配置済みカメラの箱+レンズ。1点=1箱)
+// 画面上で一定の大きさに見せるための倍率
+// (遠くのカメラでもギズモが小さくなりすぎず、近くでも画面を覆わない)
 // ============================================================
 
-const GIZMO_INPROGRESS_COLOR = [0.75, 0.78, 0.85];
-const GIZMO_PATH_COLOR = [0.92, 0.85, 0.3];
-
-function renderCameraGizmos(gl, viewMatrix, projMatrix, canvasW, canvasH) {
-  if (!ent3dProgram) return;
-
-  const points = scAllPoints();
-  if (points.length > 0) {
-    gl.useProgram(ent3dProgram);
-    gl.bindBuffer(gl.ARRAY_BUFFER, ent3dVbo);
-    gl.bufferData(gl.ARRAY_BUFFER, gizmoVertexData, gl.STATIC_DRAW);
-    const stride = 24;
-    gl.enableVertexAttribArray(ent3dAPosLoc);
-    gl.vertexAttribPointer(ent3dAPosLoc, 3, gl.FLOAT, false, stride, 0);
-    gl.enableVertexAttribArray(ent3dABrightnessLoc);
-    gl.vertexAttribPointer(ent3dABrightnessLoc, 1, gl.FLOAT, false, stride, 12);
-    gl.enableVertexAttribArray(ent3dAUVLoc);
-    gl.vertexAttribPointer(ent3dAUVLoc, 2, gl.FLOAT, false, stride, 16);
-    gl.uniform1f(ent3dUUseTextureLoc, 0.0);
-    gl.uniformMatrix4fv(ent3dUViewLoc, false, viewMatrix);
-    gl.uniformMatrix4fv(ent3dUProjLoc, false, projMatrix);
-
-    for (const p of points) {
-      const model = modelMatrixYaw(p.pos[0], p.pos[1], p.pos[2], 0);
-      gl.uniformMatrix4fv(ent3dUModelLoc, false, model);
-      const isActive = p.camId === selectedCameraId && p.waypointIndex === selectedWaypointIndex;
-      gl.uniform3f(ent3dUTintLoc, isActive ? 1.0 : 0.24, isActive ? 0.76 : 0.81, isActive ? 0.24 : 0.56);
-      gl.drawArrays(gl.TRIANGLES, 0, gizmoVertexCount);
-    }
-  }
-
-  // 動くショットは、ウェイポイントを繋ぐ軌道もガイドとして描く
-  for (const cam of sceneCameras) {
-    if (cam.mode !== 'waypoints') continue;
-    const curve = scSampleWaypointCurve(cam, 10);
-    if (curve.length < 2) continue;
-    const pairs = [];
-    for (let i = 0; i < curve.length - 1; i++) pairs.push(curve[i], curve[i + 1]);
-    _drawLineSegments(gl, viewMatrix, projMatrix, pairs, GIZMO_PATH_COLOR, canvasW, canvasH);
-  }
+function worldUnitsPerPixelAt(pos) {
+  if (typeof fcCanvas === 'undefined' || !fcCanvas) return 0.02;
+  const dx = pos[0] - fcPos[0], dy = pos[1] - fcPos[1], dz = pos[2] - fcPos[2];
+  const dist = Math.max(0.5, Math.hypot(dx, dy, dz));
+  return 2 * dist * Math.tan(fcFovDeg * Math.PI / 360) / Math.max(1, fcCanvas.height);
 }
 
-// 作成中のウェイポイント列(まだ確定していない)を、小さい点+線で見せる
-function renderInProgressWaypoints(gl, viewMatrix, projMatrix, canvasW, canvasH) {
-  if (!inProgressWaypoints || inProgressWaypoints.length === 0) return;
-  if (!ent3dProgram) return;
+const GIZMO_TARGET_ARROW_PX = 110; // 矢印の長さの見た目(画面ピクセル)
+function gizmoScaleAt(pos) { return GIZMO_TARGET_ARROW_PX * worldUnitsPerPixelAt(pos) / GIZMO_ARROW_LEN; }
 
+
+// ============================================================
+// 描画: カメラ(キーごとの箱+レンズ・軌道・再生ヘッド位置の視野枠)
+// ============================================================
+
+const GIZMO_PATH_COLOR = [0.92, 0.85, 0.3];
+const CAM_COLOR_IDLE = [0.24, 0.81, 0.56];
+const CAM_COLOR_SELECTED = [0.9, 0.62, 0.22];
+const CAM_COLOR_ACTIVE_KEY = [1.0, 0.86, 0.3];
+const FRUSTUM_COLOR = [0.95, 0.95, 0.95];
+
+function mat4RotateX(a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]);
+}
+function mat4Scale(s) { return new Float32Array([s,0,0,0, 0,s,0,0, 0,0,s,0, 0,0,0,1]); }
+function modelMatrixPose(pos, yaw, pitch, scale) {
+  return mat4Multiply(mat4Multiply(mat4Translate(pos[0], pos[1], pos[2]), mat4RotateY(yaw)),
+                      mat4Multiply(mat4RotateX(-pitch), mat4Scale(scale)));
+}
+
+function _bindGizmoMesh(gl, viewMatrix, projMatrix) {
   gl.useProgram(ent3dProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, ent3dVbo);
   gl.bufferData(gl.ARRAY_BUFFER, gizmoVertexData, gl.STATIC_DRAW);
@@ -580,21 +621,69 @@ function renderInProgressWaypoints(gl, viewMatrix, projMatrix, canvasW, canvasH)
   gl.uniform1f(ent3dUUseTextureLoc, 0.0);
   gl.uniformMatrix4fv(ent3dUViewLoc, false, viewMatrix);
   gl.uniformMatrix4fv(ent3dUProjLoc, false, projMatrix);
-  gl.uniform3f(ent3dUTintLoc, GIZMO_INPROGRESS_COLOR[0], GIZMO_INPROGRESS_COLOR[1], GIZMO_INPROGRESS_COLOR[2]);
+}
 
-  for (const wp of inProgressWaypoints) {
-    const model = modelMatrixYaw(wp.pos[0], wp.pos[1], wp.pos[2], wp.yaw);
-    gl.uniformMatrix4fv(ent3dUModelLoc, false, model);
-    gl.drawArrays(gl.TRIANGLES, 0, gizmoVertexCount);
+// 箱が遠くで米粒にならないよう、画面上で最低18px程度に見える倍率にする
+function _camBoxScale(pos) { return Math.max(1, 18 * worldUnitsPerPixelAt(pos) / 0.5); }
+
+// 今の視点のすぐ近く(=自分の目の位置)にあるキーか。
+// F/Kは「今いる場所」にカメラを置くので、置いた直後はカメラの箱やギズモの
+// 中に自分が入ってしまい、画面が箱の色で埋まる。近すぎるものは描かない。
+const NEAR_EYE_DIST = 1.6;
+function isNearEye(pos) {
+  if (typeof fcPos === 'undefined') return false;
+  return Math.hypot(pos[0] - fcPos[0], pos[1] - fcPos[1], pos[2] - fcPos[2]) < NEAR_EYE_DIST;
+}
+
+// opts.hideCamId: カメラ視点モード中など、描かないカメラ
+function renderCameraGizmos(gl, viewMatrix, projMatrix, canvasW, canvasH, opts) {
+  if (!ent3dProgram || sceneCameras.length === 0) return;
+  const hideId = opts && opts.hideCamId;
+
+  _bindGizmoMesh(gl, viewMatrix, projMatrix);
+  for (const cam of sceneCameras) {
+    if (cam.id === hideId) continue;
+    const isSel = cam.id === selectedCameraId;
+    cam.keys.forEach((k, i) => {
+      if (isNearEye(k.pos)) return;
+      gl.uniformMatrix4fv(ent3dUModelLoc, false, modelMatrixPose(k.pos, k.yaw, k.pitch, _camBoxScale(k.pos)));
+      const c = isSel ? (i === selectedKeyIndex ? CAM_COLOR_ACTIVE_KEY : CAM_COLOR_SELECTED) : CAM_COLOR_IDLE;
+      gl.uniform3f(ent3dUTintLoc, c[0], c[1], c[2]);
+      gl.drawArrays(gl.TRIANGLES, 0, gizmoVertexCount);
+    });
   }
 
-  if (inProgressWaypoints.length >= 2) {
+  // 動くショットは、キーを繋ぐ軌道もガイドとして描く
+  for (const cam of sceneCameras) {
+    if (cam.id === hideId || scCamIsStatic(cam)) continue;
+    const curve = scSampleCameraCurve(cam, 12);
     const pairs = [];
-    for (let i = 0; i < inProgressWaypoints.length - 1; i++) {
-      pairs.push(inProgressWaypoints[i].pos, inProgressWaypoints[i + 1].pos);
-    }
-    _drawLineSegments(gl, viewMatrix, projMatrix, pairs, GIZMO_INPROGRESS_COLOR, canvasW, canvasH);
+    for (let i = 0; i < curve.length - 1; i++) pairs.push(curve[i], curve[i + 1]);
+    const col = cam.id === selectedCameraId ? GIZMO_PATH_COLOR : [0.55, 0.6, 0.5];
+    _drawLineSegments(gl, viewMatrix, projMatrix, pairs, col, canvasW, canvasH, 2.5);
   }
+
+  // 選択中のカメラは、「再生ヘッドの時刻に実際どこから・どちらを向いて
+  // 撮っているか」を視野枠(四角錐)で見せる
+  const sel = scGetSelected();
+  const selPose = sel ? scPoseAtTick(sel, curTick) : null;
+  if (sel && sel.id !== hideId && !isNearEye(selPose.pos)) {
+    const pose = selPose;
+    _drawLineSegments(gl, viewMatrix, projMatrix, frustumSegments(pose, sel.fov), FRUSTUM_COLOR, canvasW, canvasH, 2);
+  }
+}
+
+function frustumSegments(pose, fovDeg) {
+  const { forward, right, up } = fcGetCameraVectors(pose.yaw, pose.pitch);
+  const depth = 70 * worldUnitsPerPixelAt(pose.pos);
+  const aspect = (typeof getOutputAspect === 'function') ? getOutputAspect() : 16 / 9;
+  const h = depth * Math.tan(fovDeg * Math.PI / 360), w = h * aspect;
+  const p = pose.pos;
+  const corner = (sx, sy) => [0, 1, 2].map(i => p[i] + forward[i] * depth + right[i] * w * sx + up[i] * h * sy);
+  const tl = corner(-1, 1), tr = corner(1, 1), br = corner(1, -1), bl = corner(-1, -1);
+  const tip = [0, 1, 2].map(i => p[i] + forward[i] * depth + up[i] * h * 1.45); // 上向きの目印
+  return [p, tl, p, tr, p, br, p, bl, tl, tr, tr, br, br, bl, bl, tl,
+          [0,1,2].map(i => tl[i] * 0.7 + tr[i] * 0.3), tip, tip, [0,1,2].map(i => tl[i] * 0.3 + tr[i] * 0.7)];
 }
 
 // 画面クリックでのギズモ選択用: 3D位置をスクリーン座標に投影する。
@@ -611,21 +700,23 @@ function projectToScreen(pos, viewMatrix, projMatrix, canvasWidth, canvasHeight)
   };
 }
 
-function pickCameraGizmo(clickX, clickY, viewMatrix, projMatrix, canvasWidth, canvasHeight) {
-  let best = null, bestDist = 30;
+// クリック位置に一番近いカメラのキー(無ければnull)。hideCamIdのカメラは対象外。
+function pickCameraGizmo(clickX, clickY, viewMatrix, projMatrix, canvasWidth, canvasHeight, hideCamId) {
+  let best = null, bestDist = 26;
   for (const p of scAllPoints()) {
+    if (p.camId === hideCamId || isNearEye(p.pos)) continue;
     const screen = projectToScreen(p.pos, viewMatrix, projMatrix, canvasWidth, canvasHeight);
     if (!screen) continue;
     const d = Math.hypot(screen.x - clickX, screen.y - clickY);
     if (d < bestDist) { bestDist = d; best = p; }
   }
-  return best; // { camId, waypointIndex, pos } | null
+  return best; // { camId, keyIndex, pos } | null
 }
 
 
 // ============================================================
-// 移動ギズモ(XYZ矢印+XZ平面ハンドル)・回転ギズモ(yaw/pitchリング)
-// どちらも線で描く簡易版。選択中のカメラにだけ表示する。
+// 移動ギズモ(XYZ矢印+XZ平面ハンドル)・回転ギズモ(左右/上下リング)
+// 画面上で常に同じ大きさ(gizmoScaleAt)で描き、マウスが乗った部分は光らせる。
 // ============================================================
 
 const GIZMO_ARROW_LEN = 2.6;
@@ -633,71 +724,69 @@ const GIZMO_ARROW_START = 0.55;
 const GIZMO_PLANE_OFFSET = 0.8;
 const GIZMO_PLANE_SIZE = 0.55;
 const GIZMO_RING_RADIUS = 2.2;
-const GIZMO_RING_SEGMENTS = 40;
+const GIZMO_RING_SEGMENTS = 48;
 const GIZMO_LINE_WIDTH_PX = 3.5; // ギズモの線の太さ(画面ピクセル単位)
 
 const GIZMO_AXIS_COLOR = { x: [0.92, 0.28, 0.28], y: [0.32, 0.85, 0.4], z: [0.32, 0.56, 0.95] };
 const GIZMO_PLANE_COLOR = [0.92, 0.85, 0.3];
 const GIZMO_RING_COLOR = { yaw: [0.91, 0.64, 0.24], pitch: [0.55, 0.5, 0.91] };
 
+let gizmoHoverPart = null; // マウスが乗っているギズモの部分(freecam.jsが更新する)
+
 function _axisVec(axis) { return axis === 'x' ? [1,0,0] : axis === 'y' ? [0,1,0] : [0,0,1]; }
 
-// 軸1本ぶんの線分(本体+矢じり)を、centerからのワールド座標点の配列で返す
-// (2点ごとに1本の線分、というgl.LINES向けのフラットな並び)
-function gizmoAxisPoints(center, axis) {
+// 軸1本ぶんの線分(本体+矢じり)。2点ごとに1本の線分、という並び。
+function gizmoAxisPoints(center, axis, s) {
   const d = _axisVec(axis);
-  const s = center.map((v, i) => v + d[i] * GIZMO_ARROW_START);
-  const e = center.map((v, i) => v + d[i] * GIZMO_ARROW_LEN);
-  const pts = [s, e];
-  // 矢じり(先端から少し戻ったところに、垂直な2方向へ短い線を足す)
-  const perp1 = axis === 'x' ? [0,1,0] : axis === 'y' ? [1,0,0] : [1,0,0];
-  const perp2 = axis === 'x' ? [0,0,1] : axis === 'y' ? [0,0,1] : [0,1,0];
-  const back = e.map((v, i) => v - d[i] * 0.35);
-  const head = (perp) => back.map((v, i) => v + perp[i] * 0.14);
-  pts.push(e, head(perp1));
-  pts.push(e, head(perp1.map(v => -v)));
-  pts.push(e, head(perp2));
-  pts.push(e, head(perp2.map(v => -v)));
+  const st = center.map((v, i) => v + d[i] * GIZMO_ARROW_START * s);
+  const e = center.map((v, i) => v + d[i] * GIZMO_ARROW_LEN * s);
+  const pts = [st, e];
+  const perp1 = axis === 'x' ? [0,1,0] : [1,0,0];
+  const perp2 = axis === 'z' ? [0,1,0] : [0,0,1];
+  const back = e.map((v, i) => v - d[i] * 0.35 * s);
+  const head = (perp) => back.map((v, i) => v + perp[i] * 0.16 * s);
+  pts.push(e, head(perp1), e, head(perp1.map(v => -v)), e, head(perp2), e, head(perp2.map(v => -v)));
   return pts;
 }
 
 // XZ平面ハンドル(正方形の枠、4辺=4線分)
-function gizmoPlaneHandlePoints(center) {
-  const o = GIZMO_PLANE_OFFSET, s = GIZMO_PLANE_SIZE;
-  const corners = [
+function gizmoPlaneHandlePoints(center, s) {
+  const o = GIZMO_PLANE_OFFSET * s, w = GIZMO_PLANE_SIZE * s;
+  const c = [
     [center[0]+o, center[1], center[2]+o],
-    [center[0]+o+s, center[1], center[2]+o],
-    [center[0]+o+s, center[1], center[2]+o+s],
-    [center[0]+o, center[1], center[2]+o+s],
+    [center[0]+o+w, center[1], center[2]+o],
+    [center[0]+o+w, center[1], center[2]+o+w],
+    [center[0]+o, center[1], center[2]+o+w],
   ];
-  return [corners[0],corners[1], corners[1],corners[2], corners[2],corners[3], corners[3],corners[0]];
+  return [c[0],c[1], c[1],c[2], c[2],c[3], c[3],c[0]];
 }
 
-// yawリング(centerを通る水平円)。1本のポリライン=N個の線分。
-function gizmoYawRingPoints(center) {
+// 左右の向き(yaw)リング: centerを通る水平円
+function gizmoYawRingPoints(center, s) {
+  const r = GIZMO_RING_RADIUS * s;
   const pts = [];
   let prev = null;
   for (let i = 0; i <= GIZMO_RING_SEGMENTS; i++) {
     const a = (i / GIZMO_RING_SEGMENTS) * Math.PI * 2;
-    const p = [center[0] + Math.sin(a) * GIZMO_RING_RADIUS, center[1], center[2] + Math.cos(a) * GIZMO_RING_RADIUS];
+    const p = [center[0] + Math.sin(a) * r, center[1], center[2] + Math.cos(a) * r];
     if (prev) pts.push(prev, p);
     prev = p;
   }
   return pts;
 }
 
-// pitchリング(centerを通り、指定yaw方向+上方向に張られた垂直円)
-function gizmoPitchRingPoints(center, baseYaw) {
+// 上下の向き(pitch)リング: centerを通り、カメラの向いている方向+真上に張られた垂直円
+function gizmoPitchRingPoints(center, baseYaw, s) {
+  const r = GIZMO_RING_RADIUS * s;
   const { forward } = fcGetCameraVectors(baseYaw, 0);
-  const up = [0, 1, 0];
   const pts = [];
   let prev = null;
   for (let i = 0; i <= GIZMO_RING_SEGMENTS; i++) {
     const a = (i / GIZMO_RING_SEGMENTS) * Math.PI * 2;
     const p = [
-      center[0] + forward[0]*Math.cos(a)*GIZMO_RING_RADIUS + up[0]*Math.sin(a)*GIZMO_RING_RADIUS,
-      center[1] + forward[1]*Math.cos(a)*GIZMO_RING_RADIUS + up[1]*Math.sin(a)*GIZMO_RING_RADIUS,
-      center[2] + forward[2]*Math.cos(a)*GIZMO_RING_RADIUS + up[2]*Math.sin(a)*GIZMO_RING_RADIUS,
+      center[0] + forward[0] * Math.cos(a) * r,
+      center[1] + Math.sin(a) * r,
+      center[2] + forward[2] * Math.cos(a) * r,
     ];
     if (prev) pts.push(prev, p);
     prev = p;
@@ -705,24 +794,28 @@ function gizmoPitchRingPoints(center, baseYaw) {
   return pts;
 }
 
-function _drawLineSegments(gl, viewMatrix, projMatrix, pointPairs, color, canvasW, canvasH) {
+// 3Dの線分を、画面上で一定の太さの帯(三角形2枚)として描く。
+// gl.lineWidth()は多くの環境で1pxに固定されてしまうため、この方式にしてある。
+function _drawLineSegments(gl, viewMatrix, projMatrix, pointPairs, color, canvasW, canvasH, widthPx) {
   if (!pointPairs.length) return;
-  const half = GIZMO_LINE_WIDTH_PX / 2;
+  const half = (widthPx || GIZMO_LINE_WIDTH_PX) / 2;
   const verts = [];
   for (let i = 0; i < pointPairs.length; i += 2) {
     const s0 = projectToScreen(pointPairs[i], viewMatrix, projMatrix, canvasW, canvasH);
     const s1 = projectToScreen(pointPairs[i+1], viewMatrix, projMatrix, canvasW, canvasH);
-    if (!s0 || !s1) continue; // カメラの後ろ側などで投影できない場合はその線分だけ飛ばす
+    if (!s0 || !s1) continue; // カメラの後ろ側などで投影できない線分は飛ばす
     let dx = s1.x - s0.x, dy = s1.y - s0.y;
     const len = Math.hypot(dx, dy) || 1;
     dx /= len; dy /= len;
-    const px = -dy * half, py = dx * half; // 線分に垂直な、画面ピクセル空間でのオフセット
+    const px = -dy * half, py = dx * half;
     const A = [s0.x+px, s0.y+py], B = [s0.x-px, s0.y-py], C = [s1.x+px, s1.y+py], D = [s1.x-px, s1.y-py];
     for (const p of [A, B, C, C, B, D]) {
       verts.push((p[0] / canvasW) * 2 - 1, 1 - (p[1] / canvasH) * 2); // ピクセル座標→NDC
     }
   }
   if (!verts.length) return;
+  const depthWasOn = gl.isEnabled(gl.DEPTH_TEST);
+  gl.disable(gl.DEPTH_TEST); // 画面に貼り付けるだけなので深度は使わない
   gl.useProgram(thickLineProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, thickLineVbo);
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(verts), gl.DYNAMIC_DRAW);
@@ -730,24 +823,37 @@ function _drawLineSegments(gl, viewMatrix, projMatrix, pointPairs, color, canvas
   gl.vertexAttribPointer(thickLineAPosLoc, 2, gl.FLOAT, false, 8, 0);
   gl.uniform3f(thickLineUTintLoc, color[0], color[1], color[2]);
   gl.drawArrays(gl.TRIANGLES, 0, verts.length / 2);
+  if (depthWasOn) gl.enable(gl.DEPTH_TEST);
 }
 
-function renderTransformGizmo(gl, viewMatrix, projMatrix, point, canvasW, canvasH) {
-  if (!point) return;
-  const c = point.pos;
-  gl.disable(gl.DEPTH_TEST); // ギズモは地形の裏に隠れず、常に見えるようにする
-  _drawLineSegments(gl, viewMatrix, projMatrix, gizmoAxisPoints(c, 'x'), GIZMO_AXIS_COLOR.x, canvasW, canvasH);
-  _drawLineSegments(gl, viewMatrix, projMatrix, gizmoAxisPoints(c, 'y'), GIZMO_AXIS_COLOR.y, canvasW, canvasH);
-  _drawLineSegments(gl, viewMatrix, projMatrix, gizmoAxisPoints(c, 'z'), GIZMO_AXIS_COLOR.z, canvasW, canvasH);
-  _drawLineSegments(gl, viewMatrix, projMatrix, gizmoPlaneHandlePoints(c), GIZMO_PLANE_COLOR, canvasW, canvasH);
-  _drawLineSegments(gl, viewMatrix, projMatrix, gizmoYawRingPoints(c), GIZMO_RING_COLOR.yaw, canvasW, canvasH);
-  _drawLineSegments(gl, viewMatrix, projMatrix, gizmoPitchRingPoints(c, point.yaw), GIZMO_RING_COLOR.pitch, canvasW, canvasH);
-  gl.enable(gl.DEPTH_TEST);
+function _gizmoPartsFor(point) {
+  const c = point.pos, s = gizmoScaleAt(c);
+  return [
+    { kind: 'axis', axis: 'x', pts: gizmoAxisPoints(c, 'x', s), color: GIZMO_AXIS_COLOR.x },
+    { kind: 'axis', axis: 'y', pts: gizmoAxisPoints(c, 'y', s), color: GIZMO_AXIS_COLOR.y },
+    { kind: 'axis', axis: 'z', pts: gizmoAxisPoints(c, 'z', s), color: GIZMO_AXIS_COLOR.z },
+    { kind: 'plane', pts: gizmoPlaneHandlePoints(c, s), color: GIZMO_PLANE_COLOR },
+    { kind: 'ring', ring: 'yaw', pts: gizmoYawRingPoints(c, s), color: GIZMO_RING_COLOR.yaw },
+    { kind: 'ring', ring: 'pitch', pts: gizmoPitchRingPoints(c, point.yaw, s), color: GIZMO_RING_COLOR.pitch },
+  ];
+}
+
+function gizmoPartsEqual(a, b) {
+  return !!a && !!b && a.kind === b.kind && a.axis === b.axis && a.ring === b.ring;
+}
+
+function renderTransformGizmo(gl, viewMatrix, projMatrix, point, canvasW, canvasH, activePart) {
+  if (!point || isNearEye(point.pos)) return;
+  for (const part of _gizmoPartsFor(point)) {
+    const hot = gizmoPartsEqual(part, activePart || gizmoHoverPart);
+    const col = hot ? part.color.map(v => v + (1 - v) * 0.6) : part.color;
+    _drawLineSegments(gl, viewMatrix, projMatrix, part.pts, col, canvasW, canvasH, hot ? 5.5 : GIZMO_LINE_WIDTH_PX);
+  }
 }
 
 
 // ============================================================
-// 移動・回転ギズモの当たり判定(画面上の距離で判定する簡易版)
+// 移動・回転ギズモの当たり判定(画面上の距離で判定する)
 // ============================================================
 
 function _pointToSegmentDist2D(px, py, ax, ay, bx, by) {
@@ -773,28 +879,18 @@ function _polylineScreenDist(points3D, mouseX, mouseY, viewMatrix, projMatrix, c
 
 const GIZMO_PICK_THRESHOLD = 12;
 
-// 選択中の点(カメラ or ウェイポイント)の移動/回転ギズモのうち、
-// クリック位置に一番近い部分を返す。
-// { kind:'axis', axis:'x'|'y'|'z' } | { kind:'plane' } | { kind:'ring', ring:'yaw'|'pitch' } | null
+// { kind:'axis', axis } | { kind:'plane' } | { kind:'ring', ring:'yaw'|'pitch' } | null
 function pickTransformGizmoPart(point, mouseX, mouseY, viewMatrix, projMatrix, cw, ch) {
-  if (!point) return null;
-  const c = point.pos;
-  const candidates = [
-    { kind: 'axis', axis: 'x', pts: gizmoAxisPoints(c, 'x') },
-    { kind: 'axis', axis: 'y', pts: gizmoAxisPoints(c, 'y') },
-    { kind: 'axis', axis: 'z', pts: gizmoAxisPoints(c, 'z') },
-    { kind: 'plane', pts: gizmoPlaneHandlePoints(c) },
-    { kind: 'ring', ring: 'yaw', pts: gizmoYawRingPoints(c) },
-    { kind: 'ring', ring: 'pitch', pts: gizmoPitchRingPoints(c, point.yaw) },
-  ];
+  if (!point || isNearEye(point.pos)) return null;
   let best = null, bestDist = GIZMO_PICK_THRESHOLD;
-  for (const cand of candidates) {
+  for (const cand of _gizmoPartsFor(point)) {
     const d = _polylineScreenDist(cand.pts, mouseX, mouseY, viewMatrix, projMatrix, cw, ch);
-    if (d < bestDist) { bestDist = d; best = cand; }
+    // 矢印・平面を、同じくらい近いリングより優先する(リングは大きく、つい当たりやすいため)
+    const bias = cand.kind === 'ring' ? 3 : 0;
+    if (d + bias < bestDist) { bestDist = d + bias; best = { kind: cand.kind, axis: cand.axis, ring: cand.ring }; }
   }
   return best;
 }
-
 
 // ============================================================
 // ドラッグ数学: マウス位置(スクリーン)からワールドの直線/平面へ変換する

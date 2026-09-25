@@ -17,10 +17,16 @@
 
     --gold: #E8A33D;      --gold-ink: #2A1B04;
     --emerald: #3ECF8E;   --emerald-ink: #04241A;
+    --amethyst: #8B7FE8;  --amethyst-ink: #17123A;
+    --danger: #E06060;
 
     --font-ui: 'Zen Kaku Gothic New', -apple-system, BlinkMacSystemFont, 'Hiragino Sans', sans-serif;
     --font-display: 'Bricolage Grotesque', var(--font-ui);
     --radius: 10px;
+
+    --tl-header-w: 136px; /* timeline.js の TL_HEADER_W と揃える */
+    --tl-row-h: 34px;     /* timeline.js の TL_ROW_H と揃える */
+    --glass: rgba(11,13,18,0.78);
   }
   * { box-sizing: border-box; }
   html { color-scheme: dark; }
@@ -31,12 +37,14 @@
          font-family: var(--font-ui); font-size:14.5px; font-weight:700; cursor:pointer;
          transition: filter .15s ease, transform .1s ease; }
   .btn:active { transform: translateY(1px); }
-  .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .btn:disabled { opacity:.4; cursor:not-allowed; }
   .btn-primary { background: var(--gold); color: var(--gold-ink); }
   .btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
   .btn-ghost { background: transparent; color: var(--ink); border:1px solid var(--border); }
   .btn-ghost:hover:not(:disabled) { border-color: var(--muted); }
   .btn-sm { padding:7px 13px; font-size:13px; border-radius:7px; }
+  kbd { font-family: var(--font-ui); font-size:11px; padding:1px 5px; border-radius:4px;
+        border:1px solid var(--border); background: var(--surface-2); color: var(--ink); }
 
   /* ============================================================
      アップロード画面
@@ -58,97 +66,236 @@
   #uploadHero .hero-art svg { width:100%; height:auto; }
 
   /* ============================================================
-     エディタ画面(ステップ1: 自由カメラで見るだけ)
+     エディタ画面: 3Dビュー
      ============================================================ */
   #editor { position:fixed; inset:0; display:none; flex-direction:column; }
   #editor.active { display:flex; }
+  /* 編集パネルを開いている間は、エディタ画面をパネルの幅だけ縮める
+     (右上のボタンや右下の小窓がパネルの下に隠れないように) */
+  #editor.panelOpen { right: min(340px, 88vw); }
 
-  #freecamArea { position:relative; flex:1; min-height:0; background:#08090c; }
-  #freecamCanvas { position:absolute; top:0; left:0; }
+  #freecamArea { position:relative; flex:1; min-height:0; background:#08090c; overflow:hidden; }
+  #freecamCanvas { position:absolute; top:0; left:0; outline:none; }
   #freecamCrosshair { position:absolute; top:50%; left:50%; width:6px; height:6px; margin:-3px 0 0 -3px;
-                       border-radius:50%; background:rgba(255,255,255,0.7); pointer-events:none; }
-  #freecamHint { position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
-                 background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); color: var(--ink); padding:8px 14px;
-                 border-radius:8px; font-size:12.5px; pointer-events:none; white-space:nowrap; border:1px solid var(--border); }
+                       border-radius:50%; background:rgba(255,255,255,0.75); pointer-events:none; display:none; z-index:3; }
 
-  /* 右下の小窓(PinP)。実際の描画はWebGL側(freecam.js)がこの位置に合わせて
-     ビューポートを切っている。この div は縁取りとクリック受け皿だけを担当する。
+  .glass { background: var(--glass); backdrop-filter: blur(4px); border:1px solid var(--border); border-radius:8px; }
+
+  /* 左上: 今のモード・移動速度・座標 */
+  #viewHud { position:absolute; top:12px; left:12px; padding:7px 11px; font-size:12.5px; color: var(--ink);
+             pointer-events:none; z-index:5; white-space:nowrap; }
+  #loadStatus { position:absolute; top:48px; left:12px; padding:6px 10px; font-size:12px; color: var(--muted);
+                pointer-events:none; z-index:5; white-space:pre-line; }
+  #loadStatus:empty { display:none; }
+
+  /* 右上の操作群(flexで並べるだけ。ボタンが増えても座標の調整は要らない) */
+  #topRightControls { position:absolute; top:12px; right:12px; z-index:6; display:flex; align-items:center; gap:8px; }
+  #fovBox { display:flex; align-items:center; gap:8px; padding:6px 12px; font-size:12px; color: var(--muted); }
+  #fovValue { min-width:30px; display:inline-block; text-align:right; color: var(--ink); }
+  #fovSlider { width:96px; accent-color: var(--gold); }
+
+  /* 左: カメラ操作のツールボタン(キーを覚えていなくても、ここから全部できる) */
+  #toolPalette { position:absolute; left:12px; top:92px; z-index:6; max-height:calc(100% - 104px); overflow-y:auto;
+                 display:flex; flex-direction:column; gap:4px; padding:6px; width:64px; scrollbar-width:none; }
+  .toolBtn { position:relative; display:flex; flex-direction:column; align-items:center; gap:1px;
+             width:100%; padding:7px 2px 5px; border-radius:7px; border:1px solid transparent;
+             background:transparent; color: var(--ink); font-family: var(--font-ui); cursor:pointer; }
+  .toolBtn .ico { font-size:18px; line-height:1.1; }
+  .toolBtn .lbl { font-size:10px; color: var(--muted); line-height:1.25; text-align:center; }
+  .toolBtn .key { position:absolute; top:3px; right:4px; font-size:9px; color: var(--muted); opacity:.9; }
+  .toolBtn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--border); }
+  .toolBtn.active { background: rgba(232,163,61,0.18); border-color: var(--gold); }
+  .toolBtn.active .lbl { color: var(--gold); }
+  .toolBtn:disabled { opacity:.35; cursor:not-allowed; }
+  .toolSep { height:1px; background: var(--border); margin:3px 4px; }
+  #toolSelection { font-size:9.5px; color: var(--muted); text-align:center; line-height:1.35; padding:4px 0 2px;
+                   word-break:break-all; }
+
+  /* 下: 今できる操作のヒント(状況に応じて変わる) */
+  #contextHint { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); z-index:5;
+                 max-width:calc(100% - 560px); min-width:260px; padding:7px 13px; font-size:12px; line-height:1.55;
+                 color: var(--ink); text-align:center; pointer-events:none; }
+
+  /* 右下の小窓(PinP)。実際の描画はWebGL側(freecam.js)が、この位置に合わせて
+     ビューポートを切っている。このdivは縁取りとクリック受け皿だけ。
      位置・サイズは freecam.js の PINP_W/PINP_H/PINP_MARGIN と揃えてある。 */
-  #pinpInset { position:absolute; bottom:14px; right:14px; width:220px; height:140px;
-               border:2px solid var(--border); border-radius:8px; cursor:pointer;
-               box-shadow:0 6px 20px rgba(0,0,0,0.4); pointer-events:none; display:none; }
+  #pinpInset { position:absolute; bottom:14px; right:14px; width:220px; height:140px; z-index:4;
+               border:2px solid var(--border); border-radius:6px; cursor:pointer;
+               box-shadow:0 6px 20px rgba(0,0,0,0.45); pointer-events:none; display:none; }
   #pinpInset.show { display:block; pointer-events:auto; }
   #pinpInset:hover { border-color: var(--gold); }
+  #pinpInset::after { content:'クリックで入れ替え'; position:absolute; left:6px; top:5px; font-size:10px;
+                      color: var(--ink); background: var(--glass); padding:1px 6px; border-radius:4px; opacity:0;
+                      transition: opacity .15s ease; }
+  #pinpInset:hover::after { opacity:1; }
 
-  #selectedCameraBox { display:none; } /* ⚠️ ステップ4で編集パネル(#editPanel)に置き換え、未使用 */
-  .waypointRow { display:flex; align-items:center; gap:8px; padding:4px 6px; border-radius:6px; cursor:pointer; }
-  .waypointRow:hover { background: var(--surface-2); }
-  .waypointRow.active { background: var(--surface-2); color: var(--ink); }
-  .waypointRow input[type="number"] { width:56px; background: var(--surface-2); color: var(--ink);
-                                       border:1px solid var(--border); border-radius:5px; padding:3px 5px; font-size:11.5px; }
-  #freecamStatus { position:absolute; top:12px; left:12px; color: var(--ink); font-size:12.5px;
-                    background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 11px; border-radius:8px;
-                    white-space:pre-line; border:1px solid var(--border); pointer-events:none; }
-  #loadStatus { position:absolute; top:50px; left:12px; color: var(--muted); font-size:12.5px;
-                background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 11px; border-radius:8px;
-                white-space:pre-line; border:1px solid var(--border); pointer-events:none; }
+  /* プレビューに重ねる、テキストのドラッグ配置レイヤー(content-blocks.jsが位置を合わせる) */
+  #textOverlayLayer { position:absolute; overflow:hidden; pointer-events:none; z-index:5; display:none; }
+  #textOverlayLayer.show { display:block; }
+  .textOverlayItem { position:absolute; transform:translate(-50%,-50%); white-space:pre-wrap; text-align:center;
+                     font-family: var(--font-display); line-height:1.2; cursor:move; pointer-events:auto;
+                     text-shadow:0 2px 6px rgba(0,0,0,0.6); user-select:none; padding:2px 4px; border-radius:4px; }
+  .textOverlayItem:hover { outline:1px dashed rgba(255,255,255,0.5); }
+  .textOverlayItem.selected { outline:1.5px dashed var(--amethyst); }
 
-  /* 右上の操作群。今後ボタンが増えてもここに並べるだけで済むようflexにしてある */
-  #topRightControls { position:absolute; top:12px; right:12px; z-index:5; display:flex; align-items:center; gap:8px; }
-  #fovBox { display:flex; align-items:center; gap:8px;
-            background:rgba(11,13,18,0.75); backdrop-filter: blur(4px); padding:7px 12px; border-radius:8px;
-            border:1px solid var(--border); font-size:12px; color: var(--muted); }
-  #fovValue { min-width:30px; display:inline-block; text-align:right; color: var(--ink); }
+  /* カメラ視点モード: 書き出す枠+三分割線 */
+  #pilotFrame { position:absolute; pointer-events:none; display:none; z-index:4;
+                border:2px solid var(--gold); box-shadow:0 0 0 9999px rgba(0,0,0,0.28);
+                background-image:
+                  linear-gradient(to right, transparent calc(33.33% - 0.5px), rgba(255,255,255,0.22) calc(33.33% - 0.5px), rgba(255,255,255,0.22) calc(33.33% + 0.5px), transparent calc(33.33% + 0.5px), transparent calc(66.66% - 0.5px), rgba(255,255,255,0.22) calc(66.66% - 0.5px), rgba(255,255,255,0.22) calc(66.66% + 0.5px), transparent calc(66.66% + 0.5px)),
+                  linear-gradient(to bottom, transparent calc(33.33% - 0.5px), rgba(255,255,255,0.22) calc(33.33% - 0.5px), rgba(255,255,255,0.22) calc(33.33% + 0.5px), transparent calc(33.33% + 0.5px), transparent calc(66.66% - 0.5px), rgba(255,255,255,0.22) calc(66.66% - 0.5px), rgba(255,255,255,0.22) calc(66.66% + 0.5px), transparent calc(66.66% + 0.5px)); }
+  #pilotFrame.show { display:block; }
+  /* 上部中央は通知(トースト)が出る場所なので、ラベルは枠の左下に置く */
+  #pilotLabel { position:absolute; bottom:10px; left:10px; padding:4px 12px;
+                border-radius:999px; background: var(--gold); color: var(--gold-ink); font-size:12px; font-weight:700;
+                white-space:nowrap; }
+
+  /* 画面上部の通知 */
+  #toast { position:absolute; top:58px; left:50%; transform:translate(-50%, -8px); z-index:9; padding:8px 16px;
+           border-radius:999px; background: var(--surface-2); border:1px solid var(--border); font-size:13px;
+           color: var(--ink); opacity:0; pointer-events:none; transition: opacity .18s ease, transform .18s ease;
+           box-shadow:0 8px 24px rgba(0,0,0,0.4); white-space:nowrap; }
+  #toast.show { opacity:1; transform:translate(-50%, 0); }
 
   /* ============================================================
-     タイムライン(ステップ4: 🎥カメラトラック、複数ブロック・複数層対応)
+     タイムライン
      ============================================================ */
-  #timelinePanel { flex-shrink:0; background: var(--surface); border-top:1px solid var(--border);
-                    display:flex; flex-direction:column; min-height:150px; max-height:260px; }
-  #timelineToolbar { display:flex; align-items:center; gap:14px; padding:10px 16px; border-bottom:1px solid var(--border); }
-  #playBtn { flex-shrink:0; }
-  #timecode { font-family: var(--font-display); font-variant-numeric: tabular-nums; font-size:13px; color: var(--muted); white-space:nowrap; }
+  #timelinePanel { position:relative; flex-shrink:0; height:250px; background: var(--surface);
+                   border-top:1px solid var(--border); display:flex; flex-direction:column; user-select:none; }
+  #timelineResizer { position:absolute; top:-4px; left:0; right:0; height:8px; cursor:ns-resize; z-index:8; }
+  #timelineResizer:hover { background: rgba(232,163,61,0.35); }
+
+  #timelineToolbar { display:flex; align-items:center; gap:6px; padding:7px 10px; border-bottom:1px solid var(--border); overflow-x:auto;
+                     flex-shrink:0; }
+  .tbBtn { display:inline-flex; align-items:center; justify-content:center; gap:5px; min-width:30px; height:30px;
+           padding:0 9px; border-radius:7px; border:1px solid var(--border); background: var(--surface-2);
+           color: var(--ink); font-family: var(--font-ui); font-size:12.5px; cursor:pointer; white-space:nowrap; }
+  .tbBtn:hover:not(:disabled) { border-color: var(--muted); }
+  .tbBtn:disabled { opacity:.35; cursor:not-allowed; }
+  .tbBtn.primary { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); font-weight:700; min-width:84px; }
+  .tbSep { width:1px; height:20px; background: var(--border); margin:0 4px; }
+  .tbSpacer { flex:1; }
+  #timecode { font-family: var(--font-display); font-variant-numeric: tabular-nums; font-size:13px; color: var(--ink);
+              white-space:nowrap; min-width:96px; text-align:center; }
   #entitySelect { background: var(--surface-2); color: var(--ink); border:1px solid var(--border); border-radius:7px;
-                  padding:8px 10px; font-size:12.5px; max-width:180px; flex-shrink:0; }
-  #frameInfo { color: var(--muted); font-size:11.5px; white-space:nowrap; flex-shrink:0; }
+                  padding:5px 8px; font-size:12px; max-width:170px; height:30px; }
+  #frameInfo { color: var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
 
-  #timelineScroll { position:relative; overflow-x:auto; overflow-y:auto; flex:1; min-height:0; }
-  #timelineRuler { position:relative; height:22px; border-bottom:1px solid var(--border);
-                    background: var(--surface); position:sticky; top:0; z-index:2; }
-  .timelineRulerMark { position:absolute; top:0; height:100%; border-left:1px solid var(--border);
-                        padding-left:4px; font-size:10.5px; color: var(--muted); line-height:22px; white-space:nowrap; }
+  #timelineScroll { position:relative; flex:1; min-height:0; overflow:auto; }
+  #timelineContent { position:relative; min-height:100%; }
 
-  #timelineCameraTrack { position:relative; }
-  .timelineLayerRow { position:relative; height:34px; border-bottom:1px solid var(--border); }
-  .timelineBlock { position:absolute; top:3px; height:28px; border-radius:6px; background: rgba(232,163,61,0.22);
-                    border:1.5px solid var(--gold); cursor:grab; overflow:hidden; user-select:none; }
-  .timelineBlock.selected { background: rgba(232,163,61,0.42); box-shadow:0 0 0 1.5px var(--ink) inset; }
-  .timelineBlock:active { cursor:grabbing; }
-  .timelineBlockLabel { padding:5px 8px; font-size:11.5px; color: var(--ink); white-space:nowrap; pointer-events:none; }
-  .timelineBlockHandle { position:absolute; top:0; width:7px; height:100%; cursor:ew-resize; }
-  .timelineBlockHandle.left { left:0; }
-  .timelineBlockHandle.right { right:0; }
+  .tlRow { display:flex; height: var(--tl-row-h); border-bottom:1px solid var(--border); position:relative; }
+  .tlHeader { position:sticky; left:0; z-index:6; width: var(--tl-header-w); flex-shrink:0; display:flex;
+              align-items:center; gap:6px; padding:0 8px 0 10px; background: var(--surface);
+              border-right:1px solid var(--border); font-size:12px; }
+  .tlHeader > span { white-space:nowrap; }
+  .tlHeaderSub { font-size:10px; color: var(--muted); }
+  .tlAddBtn { margin-left:auto; width:22px; height:22px; border-radius:6px; border:none; cursor:pointer;
+              background: var(--gold); color: var(--gold-ink); font-size:14px; line-height:1; font-weight:700;
+              display:flex; align-items:center; justify-content:center; }
+  #addTextBlockBtn.tlAddBtn { background: var(--amethyst); color: var(--amethyst-ink); }
+  .tlLane { position:relative; flex-shrink:0; height:100%; }
 
-  #timelinePlayhead { position:absolute; top:0; bottom:0; width:2px; background: var(--emerald);
-                       pointer-events:none; z-index:3; }
+  /* ルーラー(上に張り付く) */
+  #timelineRulerRow { position:sticky; top:0; z-index:7; height:24px; background: var(--surface); }
+  #timelineRulerRow .tlHeader { z-index:8; color: var(--muted); font-size:10.5px; }
+  #timelineRulerLane { cursor:text; }
+  .tlRulerMark { position:absolute; top:0; bottom:0; border-left:1px solid #3a4150; padding-left:4px;
+                 font-size:10.5px; color: var(--muted); line-height:22px; white-space:nowrap; pointer-events:none; }
+  .tlRulerMinor { position:absolute; bottom:0; height:6px; border-left:1px solid #2d333f; pointer-events:none; }
+
+  #timelineTextRow .tlLane { height:100%; }
+  .tlEmpty { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:11.5px; color: var(--muted);
+             white-space:nowrap; pointer-events:none; }
+
+  .tlBlock { position:absolute; top:3px; height:calc(var(--tl-row-h) - 7px); border-radius:6px; cursor:grab;
+             overflow:hidden; border:1.5px solid; }
+  .tlBlock:active { cursor:grabbing; }
+  .tlBlock.cam { background: rgba(232,163,61,0.20); border-color: var(--gold); }
+  .tlBlock.cam.selected { background: rgba(232,163,61,0.42); box-shadow: inset 0 0 0 1.5px var(--ink); }
+  .tlBlock.text { background: rgba(139,127,232,0.22); border-color: var(--amethyst); }
+  .tlBlock.text.selected { background: rgba(139,127,232,0.45); box-shadow: inset 0 0 0 1.5px var(--ink); }
+  .tlBlockLabel { position:absolute; left:8px; top:3px; right:36px; font-size:11px; font-weight:700; color: var(--ink);
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+  .tlBlockDur { position:absolute; right:7px; bottom:2px; font-size:9.5px; color: var(--muted); pointer-events:none; }
+  .tlHandle { position:absolute; top:0; bottom:0; width:7px; cursor:ew-resize; z-index:3; }
+  .tlHandle.left { left:0; } .tlHandle.right { right:0; }
+  .tlBlock:hover .tlHandle, .tlBlock.selected .tlHandle { background: rgba(255,255,255,0.14); }
+  /* ◆キー(動くショットの各ポイント) */
+  .tlKey { position:absolute; bottom:5px; width:10px; height:10px; margin-left:-5px; transform:rotate(45deg);
+           background: var(--ink); border:1.5px solid var(--gold-ink); z-index:4; cursor:ew-resize; }
+  .tlKey:hover { background:#fff; box-shadow:0 0 0 2px rgba(255,255,255,0.35); }
+  .tlKey.active { background: var(--gold); border-color:#fff; }
+
+  #timelinePlayhead { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background: var(--emerald);
+                      z-index:5; pointer-events:none; }
+  #timelinePlayhead::before { content:''; position:absolute; top:0; left:-5px; width:12px; height:10px;
+                              background: var(--emerald); clip-path: polygon(0 0, 100% 0, 50% 100%); }
+  #timelineSnapLine { position:absolute; top:0; bottom:0; width:1px; background:#fff; opacity:.7; z-index:5;
+                      pointer-events:none; display:none; }
 
   /* ============================================================
-     編集パネル(右側スライドパネル。ブロックのダブルクリックで開く)
+     編集パネル(右側。ブロックのダブルクリックで開く)
      ============================================================ */
-  #editPanel { position:fixed; top:0; right:0; bottom:0; width:320px; max-width:88vw;
-               background: var(--surface); border-left:1px solid var(--border);
-               box-shadow:-12px 0 32px rgba(0,0,0,0.4); transform:translateX(100%);
-               transition: transform .18s ease; display:flex; flex-direction:column; z-index:15; }
+  #editPanel { position:fixed; top:0; right:0; bottom:0; width:340px; max-width:88vw; z-index:15;
+               background: var(--surface); border-left:1px solid var(--border); box-shadow:-12px 0 32px rgba(0,0,0,0.4);
+               transform:translateX(100%); transition: transform .18s ease; display:flex; flex-direction:column; }
   #editPanel.open { transform:translateX(0); }
-  #editPanelHeader { display:flex; align-items:center; justify-content:space-between; padding:16px 18px;
-                      border-bottom:1px solid var(--border); }
+  #editPanelHeader { display:flex; align-items:center; justify-content:space-between; padding:15px 18px;
+                     border-bottom:1px solid var(--border); }
   #editPanelHeader h2 { font-family: var(--font-display); font-size:15px; margin:0; }
   #editPanelClose { background:none; border:none; color: var(--muted); font-size:17px; cursor:pointer; padding:4px; }
   #editPanelClose:hover { color: var(--ink); }
-  #editPanelBody { padding:16px 18px; overflow-y:auto; flex:1; }
-  #editPanelBody .fieldRow { display:flex; align-items:center; gap:10px; margin-bottom:16px; }
-  #editPanelBody .fieldRow label { font-size:12.5px; color: var(--muted); min-width:72px; }
-  #editPanelWaypointList { display:flex; flex-direction:column; gap:4px; margin-top:8px; }
+  #editPanelBody { padding:16px 18px 24px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:14px; }
+  .fieldRow { display:flex; align-items:center; gap:10px; }
+  .fieldRow.column { flex-direction:column; align-items:stretch; gap:6px; }
+  .fieldRow > label { font-size:12.5px; color: var(--muted); min-width:64px; }
+  .fieldRow input[type="range"] { flex:1; accent-color: var(--gold); }
+  .fieldValue { min-width:36px; text-align:right; font-variant-numeric: tabular-nums; font-size:12.5px; }
+  .panelInput { flex:1; min-width:0; background: var(--surface-2); color: var(--ink); border:1px solid var(--border);
+                border-radius:7px; padding:7px 9px; font-family: var(--font-ui); font-size:13px; }
+  .panelInput:focus { outline:none; border-color: var(--gold); }
+  textarea.panelInput { resize:vertical; }
+  .panelInput.small { flex:0 0 72px; padding:4px 6px; font-size:12px; }
+  .panelActions { display:flex; flex-direction:column; gap:6px; }
+  .panelActions .btn { justify-content:center; }
+  .panelSectionLabel { font-size:11px; color: var(--muted); font-weight:700; letter-spacing:.04em; margin-top:4px; }
+  .keyList { display:flex; flex-direction:column; gap:3px; }
+  .keyRow { display:flex; align-items:center; gap:8px; padding:5px 7px; border-radius:6px; cursor:pointer; font-size:12.5px; }
+  .keyRow:hover { background: var(--surface-2); }
+  .keyRow.active { background: rgba(232,163,61,0.16); }
+  .keyRowLabel { flex:1; }
+  .keyRowDel { background:none; border:none; color: var(--muted); cursor:pointer; font-size:12px; padding:2px 5px; }
+  .keyRowDel:hover { color: var(--danger); }
+  .panelHint { font-size:12px; color: var(--muted); line-height:1.65; }
+  .dangerBtn { color: var(--danger); border-color:#4a2222; justify-content:center; }
+  .dangerBtn:hover:not(:disabled) { border-color: var(--danger); }
+  .colorInput { width:44px; height:28px; border:1px solid var(--border); border-radius:6px; background:none; cursor:pointer; padding:0; }
+
+  .settingsRadioGroup { display:flex; gap:6px; flex-wrap:wrap; }
+  .settingsRadioPill { padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:transparent;
+                        color: var(--muted); font-family: var(--font-ui); font-size:12.5px; cursor:pointer; }
+  .settingsRadioPill:hover { border-color: var(--muted); color: var(--ink); }
+  .settingsRadioPill.active { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); font-weight:700; }
+
+  /* ============================================================
+     操作ヘルプ
+     ============================================================ */
+  #helpOverlay { position:fixed; inset:0; z-index:25; display:none; align-items:center; justify-content:center;
+                 background:rgba(5,6,9,0.6); backdrop-filter: blur(2px); }
+  #helpOverlay.open { display:flex; }
+  #helpBox { width:720px; max-width:calc(100vw - 40px); max-height:calc(100vh - 60px); overflow-y:auto;
+             background: var(--surface); border:1px solid var(--border); border-radius: var(--radius);
+             padding:20px 24px 24px; box-shadow:0 16px 48px rgba(0,0,0,0.5); }
+  #helpBox h2 { font-family: var(--font-display); font-size:17px; margin:0; }
+  #helpHead { display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; }
+  #helpClose { background:none; border:none; color: var(--muted); font-size:18px; cursor:pointer; }
+  .helpCols { display:grid; grid-template-columns: 1fr 1fr; gap:18px 28px; }
+  .helpCols h3 { font-size:12.5px; color: var(--gold); margin:0 0 8px; }
+  .helpCols table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  .helpCols td { padding:4px 0; vertical-align:top; }
+  .helpCols td:first-child { white-space:nowrap; padding-right:12px; color: var(--muted); }
+  .helpFlow { margin:0 0 16px; padding:10px 14px; border-radius:8px; background: var(--surface-2); font-size:12.5px; line-height:1.8; }
 
   /* ============================================================
      プロジェクト設定(セクション制: 左ナビ+右コンテンツ)
@@ -164,7 +311,6 @@
   #settingsModalHeader h2 { font-family: var(--font-display); font-size:16px; margin:0; }
   #settingsModalClose { background:none; border:none; color: var(--muted); font-size:18px; cursor:pointer; line-height:1; padding:4px; }
   #settingsModalClose:hover { color: var(--ink); }
-
   #settingsModalMain { flex:1; min-height:0; display:flex; }
   #settingsNav { width:168px; flex-shrink:0; border-right:1px solid var(--border); padding:12px;
                  display:flex; flex-direction:column; gap:2px; overflow-y:auto; }
@@ -173,21 +319,27 @@
                       font-size:13.5px; text-align:left; cursor:pointer; }
   .settingsNavItem:hover { background: var(--surface-2); color: var(--ink); }
   .settingsNavItem.active { background: var(--surface-2); color: var(--ink); font-weight:700; }
-
   #settingsModalBody { flex:1; min-width:0; padding:20px; overflow-y:auto; display:flex; flex-direction:column; gap:16px; }
+  #settingsModalBody .fieldRow { flex-direction:column; align-items:stretch; gap:6px; }
   .settingsSectionTitle { font-family: var(--font-display); font-size:14px; font-weight:700; margin:0 0 4px; }
-  .panelHint { font-size:12px; color: var(--muted); }
   #playerTexturePreviewRow { display:flex; align-items:center; gap:14px; margin-top:8px; }
   #playerTexturePreview { width:56px; height:56px; border-radius:8px; background: var(--surface-2);
                            display:flex; align-items:center; justify-content:center; font-size:11px; color: var(--muted);
                            overflow:hidden; flex-shrink:0; }
-  #playerTexturePreview img { width:100%; height:100%; object-fit:cover; }
-  .settingsRadioGroup { display:flex; gap:8px; flex-wrap:wrap; }
-  .settingsRadioPill { padding:8px 14px; border-radius:8px; border:1px solid var(--border); background:transparent;
-                        color: var(--muted); font-size:12.5px; cursor:pointer; }
-  .settingsRadioPill:hover { border-color: var(--muted); }
-  .settingsRadioPill.active { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); font-weight:700; }
+  #playerTexturePreview img { width:100%; height:100%; object-fit:cover; image-rendering:pixelated; }
 
+  /* 画面の高さが低い時は、ツールボタンを アイコン+キー だけのコンパクト表示にする
+     (説明はマウスを乗せると出る) */
+  @media (max-height: 820px) {
+    #toolPalette { width:50px; padding:5px; gap:2px; }
+    .toolBtn { padding:6px 2px 4px; }
+    .toolBtn .lbl, #toolSelection { display:none; }
+    .toolBtn .ico { font-size:17px; }
+  }
+  @media (max-width: 1100px) {
+    #frameInfo { display:none; }
+    #contextHint { max-width:calc(100% - 340px); }
+  }
 </style>
 </head>
 <body>
@@ -231,48 +383,157 @@
 
 <div id="editor">
   <div id="freecamArea">
-    <canvas id="freecamCanvas"></canvas>
+    <canvas id="freecamCanvas" tabindex="-1"></canvas>
     <div id="freecamCrosshair"></div>
-    <div id="freecamStatus">-</div>
-    <div id="loadStatus"></div>
-    <div id="topRightControls">
-      <button id="gotoBtn" class="btn btn-ghost btn-sm">📍 プレイヤーへ移動</button>
-      <div id="fovBox">画角 <input type="range" id="fovSlider" min="30" max="110" value="70"><span id="fovValue">70°</span></div>
-      <button id="projectSettingsBtn" class="btn btn-ghost btn-sm">⚙ 設定</button>
-    </div>
+    <div id="pilotFrame"><div id="pilotLabel"></div></div>
+    <div id="textOverlayLayer"></div>
     <div id="pinpInset" title="クリックで主画面と入れ替え"></div>
-    <div id="freecamHint">クリックしてマウス操作を開始 / WASD移動・Space上昇・Shift下降・マウスで視点 / Fでこの場所にカメラを固定 / Gでウェイポイント追加・Enterで確定 / Escでマウス解放してギズモを操作</div>
+
+    <div id="viewHud" class="glass">-</div>
+    <div id="loadStatus" class="glass"></div>
+
+    <div id="topRightControls">
+      <button id="gotoBtn" class="btn btn-ghost btn-sm glass">📍 プレイヤーへ移動</button>
+      <div id="fovBox" class="glass">画角 <input type="range" id="fovSlider" min="20" max="110" value="70"><span id="fovValue">70°</span></div>
+      <button id="projectSettingsBtn" class="btn btn-ghost btn-sm glass">⚙ 設定</button>
+      <button id="helpBtn" class="btn btn-ghost btn-sm glass" title="操作ヘルプ (?)">？ 操作</button>
+    </div>
+
+    <!-- カメラ操作のツールボタン(キーボードの F/G/K/V と同じことができる) -->
+    <div id="toolPalette" class="glass">
+      <button id="toolNewCamera" class="toolBtn" title="今見えている構図で、再生ヘッドの位置にカメラを置く (F)">
+        <span class="key">F</span><span class="ico">📷</span><span class="lbl">カメラを<br>置く</span></button>
+      <button id="toolNextPoint" class="toolBtn" title="選択中のカメラに、今の構図を次のポイントとして継ぎ足す (G)">
+        <span class="key">G</span><span class="ico">➕</span><span class="lbl">次の<br>ポイント</span></button>
+      <button id="toolRecordKey" class="toolBtn" title="今の構図を、再生ヘッドの時刻のキーとして記録 (K)">
+        <span class="key">K</span><span class="ico">◆</span><span class="lbl">キーを<br>記録</span></button>
+      <div class="toolSep"></div>
+      <button id="toolPilot" class="toolBtn" title="選択中のカメラの目線に入って、構図を直す (V)">
+        <span class="key">V</span><span class="ico">🎥</span><span class="lbl">カメラ<br>視点</span></button>
+      <button id="toolFly" class="toolBtn" title="マウスを捕まえて飛ぶ(トラックパッド向け)。Escで終了">
+        <span class="ico">✈</span><span class="lbl">飛行<br>モード</span></button>
+      <div class="toolSep"></div>
+      <button id="toolDelete" class="toolBtn" title="選択中のものを削除 (Delete)">
+        <span class="ico">🗑</span><span class="lbl">削除</span></button>
+      <div id="toolSelection">未選択</div>
+    </div>
+
+    <div id="contextHint" class="glass"></div>
+    <div id="toast"></div>
   </div>
 
   <div id="timelinePanel">
+    <div id="timelineResizer" title="ドラッグでタイムラインの高さを変える"></div>
     <div id="timelineToolbar">
-      <button id="playBtn" class="btn btn-primary btn-sm">▶ 再生</button>
-      <div id="timecode">0:00 / 0:00</div>
-      <select id="entitySelect"></select>
+      <button id="toStartBtn" class="tbBtn" title="先頭へ (Home)">⏮</button>
+      <button id="playBtn" class="tbBtn primary" title="再生/一時停止 (Space)">▶ 再生</button>
+      <div id="timecode">0:00.0 / 0:00</div>
+      <div class="tbSep"></div>
+      <button id="undoBtn" class="tbBtn" title="取り消し (Ctrl/Cmd+Z)" disabled>↶</button>
+      <button id="redoBtn" class="tbBtn" title="やり直し (Ctrl/Cmd+Shift+Z)" disabled>↷</button>
+      <div class="tbSep"></div>
+      <button id="splitBtn" class="tbBtn" title="選択中のブロックを再生ヘッドの位置で分割 (B)" disabled>✂ 分割</button>
+      <button id="duplicateBtn" class="tbBtn" title="複製 (Ctrl/Cmd+D)" disabled>⧉ 複製</button>
+      <button id="deleteBtn" class="tbBtn" title="削除 (Delete)" disabled>🗑</button>
+      <div class="tbSpacer"></div>
       <div id="frameInfo">-</div>
+      <select id="entitySelect" title="表示するプレイヤー"></select>
+      <div class="tbSep"></div>
+      <button id="zoomOutBtn" class="tbBtn" title="縮小 (Ctrl/Cmd+ホイール)">－</button>
+      <button id="zoomFitBtn" class="tbBtn" title="全体を表示">全体</button>
+      <button id="zoomInBtn" class="tbBtn" title="拡大 (Ctrl/Cmd+ホイール)">＋</button>
     </div>
     <div id="timelineScroll">
-      <div id="timelineRuler"></div>
-      <div id="timelineCameraTrack"></div>
-      <div id="timelinePlayhead"></div>
+      <div id="timelineContent">
+        <div class="tlRow" id="timelineRulerRow">
+          <div class="tlHeader">時間</div>
+          <div class="tlLane" id="timelineRulerLane"></div>
+        </div>
+        <div id="timelineCameraRows"></div>
+        <div class="tlRow" id="timelineTextRow">
+          <div class="tlHeader"><span>📝 テキスト</span>
+            <button id="addTextBlockBtn" class="tlAddBtn" title="再生ヘッドの位置にテキストを追加">＋</button></div>
+          <div class="tlLane" id="timelineTextLane"></div>
+        </div>
+        <div id="timelinePlayhead"></div>
+        <div id="timelineSnapLine"></div>
+      </div>
     </div>
   </div>
 </div>
 
-<!-- 右側スライドパネル(ブロックのダブルクリックで開く。画角・動くショットの
-     ウェイポイント到達時刻を編集する) -->
+<!-- 右側スライドパネル(ブロックのダブルクリックで開く) -->
 <div id="editPanel">
   <div id="editPanelHeader">
     <h2 id="editPanelTitle">ブロックを編集</h2>
-    <button id="editPanelClose">✕</button>
+    <button id="editPanelClose" title="閉じる (Esc)">✕</button>
   </div>
   <div id="editPanelBody"></div>
 </div>
 
-<!-- プロジェクト全体の設定(3Dではない、普通のフォーム画面)。
-     左のカテゴリ一覧(#settingsNav)+右の中身(#settingsModalBody)という
-     「設定ページ」の形。中身はどちらもproject-settings.jsが動的に組み立てる。
-     今後、機能が増えるたびにSETTINGS_SECTIONSにカテゴリを1つ足すだけで済む。 -->
+<!-- 操作ヘルプ(? キー / 右上の「？ 操作」) -->
+<div id="helpOverlay">
+  <div id="helpBox">
+    <div id="helpHead"><h2>操作ヘルプ</h2><button id="helpClose">✕</button></div>
+    <div class="helpFlow">
+      <b>基本の流れ:</b> 右ドラッグで見回しながら WASD で良いアングルへ →
+      <kbd>F</kbd> でカメラを置く → 再生ヘッドを進めて別の場所へ飛ぶ → <kbd>K</kbd> でキーを記録
+      (これで動くショットになります) → <kbd>Space</kbd> で再生して確認。<br>
+      構図を直したい時は、カメラを選んで <kbd>V</kbd>(カメラ視点)→ 動かして <kbd>K</kbd>。
+    </div>
+    <div class="helpCols">
+      <div>
+        <h3>視点の操作</h3>
+        <table>
+          <tr><td>右ドラッグ(Alt+左ドラッグ)</td><td>見回す</td></tr>
+          <tr><td>WASD</td><td>移動(右ドラッグ中はさらに Space/Shift で上下)</td></tr>
+          <tr><td>Q / E</td><td>下降 / 上昇</td></tr>
+          <tr><td>右ドラッグ中にホイール</td><td>移動速度を変える</td></tr>
+          <tr><td>ホイール</td><td>前後に移動</td></tr>
+          <tr><td>中ボタンドラッグ</td><td>平行移動</td></tr>
+          <tr><td>✈ 飛行モード</td><td>マウスを捕まえて飛ぶ(トラックパッド向け、Escで終了)</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>カメラ</h3>
+        <table>
+          <tr><td><kbd>F</kbd></td><td>今の構図で、再生ヘッドの位置にカメラを置く</td></tr>
+          <tr><td><kbd>K</kbd></td><td>今の構図を、再生ヘッドの時刻のキーとして記録</td></tr>
+          <tr><td><kbd>G</kbd></td><td>最後のポイントの2秒後に、今の構図を継ぎ足す</td></tr>
+          <tr><td><kbd>V</kbd></td><td>選択中のカメラの目線に入る/戻る</td></tr>
+          <tr><td>箱をクリック</td><td>そのカメラ・ポイントを選ぶ</td></tr>
+          <tr><td>矢印 / リングをドラッグ</td><td>選んだポイントの位置 / 向きを直す</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>タイムライン</h3>
+        <table>
+          <tr><td><kbd>Space</kbd></td><td>再生 / 一時停止</td></tr>
+          <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>1コマ移動(Shiftで1秒)</td></tr>
+          <tr><td><kbd>Home</kbd> <kbd>End</kbd></td><td>先頭 / 最後へ</td></tr>
+          <tr><td>ルーラーをドラッグ</td><td>再生ヘッドを動かす(Altで吸着しない)</td></tr>
+          <tr><td>Ctrl/Cmd+ホイール</td><td>拡大・縮小(トラックパッドはピンチ)</td></tr>
+          <tr><td>ブロックを上下にドラッグ</td><td>カメラの重なり順(上ほど手前)</td></tr>
+          <tr><td>◆ をドラッグ</td><td>そのポイントの時刻を変える</td></tr>
+        </table>
+      </div>
+      <div>
+        <h3>編集</h3>
+        <table>
+          <tr><td><kbd>Ctrl/Cmd</kbd>+<kbd>Z</kbd></td><td>取り消し</td></tr>
+          <tr><td><kbd>Ctrl/Cmd</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>やり直し</td></tr>
+          <tr><td><kbd>B</kbd></td><td>選択中のブロックを再生ヘッドで分割</td></tr>
+          <tr><td><kbd>Ctrl/Cmd</kbd>+<kbd>D</kbd></td><td>複製</td></tr>
+          <tr><td><kbd>Delete</kbd></td><td>削除(◆を選んでいればそのポイントだけ)</td></tr>
+          <tr><td>ダブルクリック</td><td>編集パネルを開く</td></tr>
+          <tr><td><kbd>Esc</kbd></td><td>カメラ視点・パネルを閉じる / 選択を外す</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- プロジェクト全体の設定(左のカテゴリ一覧+右の中身。project-settings.jsが組み立てる) -->
 <div id="settingsModal">
   <div id="settingsModalBox">
     <div id="settingsModalHeader">
@@ -286,25 +547,27 @@
   </div>
 </div>
 
-<!-- ⚠️ 現時点ではまだ content-blocks.js は読み込んでいない(ステップ6以降で追加予定)。 -->
-
 <!-- Pyodide(ブラウザ内でPythonを動かす仕組み)は、メインスレッドを止めない
      よう別スレッド(pyodide-worker.js、Web Worker)の中で読み込む。
-     このページ自体からはpyodide.jsを直接読み込む必要はない。
      サーバーへのアップロードは一切発生しない -->
 
 <!-- textures.zip をブラウザ内で展開するためのライブラリ(個々のpng配布の代わり) -->
 <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
-<!-- 共有の状態・定数は shared.js、シーンエディタの3D(人物モデル・
-     カメラギズモ・移動/回転ギズモ)は entities3d.js、地形描画・自由カメラ・
-     画面の主/小窓切り替えは freecam.js、🎥カメラトラックのタイムラインUIと
-     編集パネルは timeline.js、プロジェクト設定(テクスチャ・書き出し画質)は
-     project-settings.js、UI(アップロード・Pyodide呼び出し・再生)は ui.js -->
+<!-- shared.js: 面の形・タイムラインの状態など共通の定数
+     entities3d.js: カメラのデータ(キーフレーム)・人物モデル・ギズモの描画
+     freecam.js: 地形の描画・視点操作・カメラ操作・プレビュー
+     editor-core.js: 取り消し/やり直し・選択・キーボードショートカット・通知
+     timeline.js: タイムラインと編集パネル
+     content-blocks.js: テキストブロック
+     project-settings.js: プロジェクト設定
+     ui.js: アップロード・Pyodide呼び出し・再生 -->
 <script src="shared.js"></script>
 <script src="entities3d.js"></script>
 <script src="freecam.js"></script>
+<script src="editor-core.js"></script>
 <script src="timeline.js"></script>
+<script src="content-blocks.js"></script>
 <script src="project-settings.js"></script>
 <script src="ui.js"></script>
 </body>

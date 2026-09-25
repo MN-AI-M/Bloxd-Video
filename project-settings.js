@@ -33,13 +33,20 @@ const EXPORT_QUALITY_PRESETS = {
   high:     { label: '高画質', bitsPerSecond: 8_000_000 },
   highest:  { label: '最高画質', bitsPerSecond: 16_000_000 },
 };
+// プレビューは常に「書き出す動画と同じ縦横比の枠」で表示する(freecam.jsの
+// previewRectGL)ので、解像度はここで決めた固定サイズのどれかにする。
 const EXPORT_RESOLUTION_PRESETS = {
-  original: { label: '編集画面と同じ', size: null }, // null = 書き出し時のキャンバスサイズをそのまま使う
-  hd720:    { label: '1280×720', size: [1280, 720] },
-  hd1080:   { label: '1920×1080', size: [1920, 1080] },
+  hd720:  { label: '1280×720', size: [1280, 720] },
+  hd1080: { label: '1920×1080', size: [1920, 1080] },
 };
 let exportQualityId = 'high';
-let exportResolutionId = 'original';
+let exportResolutionId = 'hd1080';
+
+// 書き出す動画の縦横比(プレビュー枠・カメラ視点の枠・視野枠が使う)
+function getOutputAspect() {
+  const p = EXPORT_RESOLUTION_PRESETS[exportResolutionId] || EXPORT_RESOLUTION_PRESETS.hd1080;
+  return p.size[0] / p.size[1];
+}
 
 
 // ============================================================

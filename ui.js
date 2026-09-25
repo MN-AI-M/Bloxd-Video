@@ -185,7 +185,9 @@ document.getElementById('processBtn').addEventListener('click', async () => {
         setupTransportControls();
         setupFovControl();
         await initFreecamOnce();
-        timelineInit(); // 🎥カメラトラックのUI配線(タイムラインのDOMが揃ってから)
+        editorCoreInit();    // 取り消し/やり直し・キーボードショートカット・操作ヘルプ
+        timelineInit();      // タイムラインのUI配線(タイムラインのDOMが揃ってから)
+        contentBlocksInit(); // 📝テキストブロックのUI配線
         setupProjectSettingsModal(); // ⚙プロジェクト設定の配線
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
@@ -291,31 +293,45 @@ function setupEntitySelector() {
   }
   sel.value = allTimelines.localPlayerEntityId;
   sel.addEventListener('change', () => {
+    // 表示するプレイヤーを切り替えても、再生位置(=カメラ・テキストの時刻)は保つ
+    const keep = curTick;
     setRendererTimeline(allTimelines.entities[sel.value]);
-    curTick = 0;
-    updateScrubUI();
+    if (typeof seekTo === 'function') seekTo(keep); else curTick = keep;
+    if (typeof editorChanged === 'function') editorChanged();
+    sel.blur(); // フォーカスが残るとSpace等のショートカットが効かないため
   });
   setRendererTimeline(allTimelines.entities[sel.value]);
 }
 
 
 // ============================================================
-// 再生・スクラブ(簡易トランスポート。ブロック式タイムラインは後続ステップ)
+// 再生
 // ============================================================
 // 自由カメラは毎フレーム自分で再描画してる(freecamLoop)ので、ここでは
 // curTick/timelineの状態を更新するだけで良い。
+// 再生位置の変更(シーク)は、timeline.js(ルーラーのクリック/ドラッグ)と
+// editor-core.js(矢印キー・Home/End)が担当する。
 
 function setupTransportControls() {
-  document.getElementById('playBtn').addEventListener('click', () => {
-    if (playing) stopPlayback(); else startPlayback();
-  });
-  // 再生位置の変更(シーク)は、timeline.jsが#timelineScrollのクリック/ドラッグで行う。
+  document.getElementById('playBtn').addEventListener('click', togglePlayback);
+}
+
+function togglePlayback() {
+  if (playing) stopPlayback(); else startPlayback();
 }
 
 function startPlayback() {
-  if (playing) return;
+  if (playing || !timeline) return;
+  // 最後まで行っていたら、先頭から再生し直す
+  if (streamingDone && curTick >= timeline.frames.length - 1) curTick = 0;
   playing = true;
-  document.getElementById('playBtn').innerText = '⏸ 一時停止';
+  document.getElementById('playBtn').innerText = '⏸ 停止';
+  // カメラがあれば、書き出される映像(プレビュー)を主画面にして再生する。
+  // 視点を動かすと、自動で編集視点に戻る。カメラ視点モード中はそのまま。
+  if (typeof sceneCameras !== 'undefined' && sceneCameras.length &&
+      typeof pilot !== 'undefined' && !pilot && typeof previewIsMain !== 'undefined') {
+    previewIsMain = true;
+  }
   lastFrameTime = performance.now();
   playTick();
 }
@@ -325,6 +341,7 @@ function stopPlayback() {
   playing = false;
   document.getElementById('playBtn').innerText = '▶ 再生';
   if (animId) cancelAnimationFrame(animId);
+  if (typeof updateTimelineToolbar === 'function') updateTimelineToolbar();
 }
 
 function playTick() {
@@ -337,7 +354,10 @@ function playTick() {
     const maxAvailable = timeline.frames.length - 1;
     const next = Math.min(curTick + ticksToAdvance, maxAvailable);
     curTick = next;
-    lastFrameTime = now;
+    // 端数を捨てずに持ち越す(捨てると、再生が実際の時間より少しずつ遅れていく)。
+    // ただし大きく遅れた時(タブが裏にあった等)や、末尾で待っている間は持ち越さない
+    lastFrameTime += ticksToAdvance * 1000 / tps;
+    if (now - lastFrameTime > 250 || curTick >= maxAvailable) lastFrameTime = now;
     if (curTick >= maxAvailable) {
       if (streamingDone) {
         stopPlayback(); // 本当にここで終わり
@@ -357,19 +377,22 @@ function updateScrubUI() {
   const maxAvailable = timeline.frames.length - 1;
   const tps = allTimelines.ticksPerSecond || 30;
   const cur = curTick / tps, total = maxAvailable / tps;
-  document.getElementById('timecode').innerText = formatSeconds(cur) + ' / ' + formatSeconds(total);
+  const text = formatSeconds(cur, true) + ' / ' + formatSeconds(total, false);
+  const el = document.getElementById('timecode');
+  if (el.innerText !== text) el.innerText = text;
   if (typeof timelineUpdatePlayhead === 'function') timelineUpdatePlayhead();
 }
 
-function formatSeconds(seconds) {
+function formatSeconds(seconds, withFraction) {
   const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return m + ':' + String(s).padStart(2, '0');
+  const s = seconds - m * 60;
+  return m + ':' + (withFraction ? s.toFixed(1).padStart(4, '0') : String(Math.floor(s)).padStart(2, '0'));
 }
 
 
 // ============================================================
-// 画角(FOV)スライダー
+// 画角(FOV)スライダー(今見ている視点の画角。カメラ視点モード中は、
+// Kで記録した時にそのカメラの画角になる)
 // ============================================================
 
 function setupFovControl() {
@@ -378,6 +401,7 @@ function setupFovControl() {
   fovSlider.oninput = () => {
     fcFovDeg = parseInt(fovSlider.value);
     fovValue.innerText = fcFovDeg + '°';
+    if (typeof pilot !== 'undefined' && pilot) pilot.dirty = true; // 未記録の変更として扱う
   };
 }
 
