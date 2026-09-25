@@ -187,7 +187,7 @@ document.getElementById('processBtn').addEventListener('click', async () => {
         await initFreecamOnce();
         editorCoreInit();    // 取り消し/やり直し・キーボードショートカット・操作ヘルプ
         timelineInit();      // タイムラインのUI配線(タイムラインのDOMが揃ってから)
-        contentBlocksInit(); // 📝テキストブロックのUI配線
+        assetLibraryInit();  // 左の素材一覧(カメラ・テキストなどの追加)
         setupProjectSettingsModal(); // ⚙プロジェクト設定の配線
       } else if (editorShown) {
         // 継ぎ足された分をそのまま反映する(自由カメラは毎フレーム自分で
@@ -381,6 +381,7 @@ function updateScrubUI() {
   const el = document.getElementById('timecode');
   if (el.innerText !== text) el.innerText = text;
   if (typeof timelineUpdatePlayhead === 'function') timelineUpdatePlayhead();
+  if (typeof syncCameraPanelToPlayhead === 'function') syncCameraPanelToPlayhead(false);
 }
 
 function formatSeconds(seconds, withFraction) {

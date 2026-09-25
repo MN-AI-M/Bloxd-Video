@@ -1,6 +1,7 @@
 // content-blocks.js
 // ============================================================
 // 📝テキストブロック(🎵音楽ブロックは後続ステップで追加予定)。
+// 追加は、左の素材一覧(asset-library.js)の「テキスト」から行う。
 //
 // タイムライン上の操作(ドラッグ・伸縮・吸着・取り消し)は timeline.js の
 // 共通処理(tlStartBlockDrag)を使う。テキストは層の意味を持たないので、
@@ -19,10 +20,11 @@ let selectedTextBlockId = null;
 const DEFAULT_TEXT_BLOCK_SECONDS = 2;
 const TEXT_REFERENCE_HEIGHT = 720;
 
-function ctAddTextBlock() {
+// props: 見た目の初期値(content, fontSize, color, weight, anim, x, y)。省略した所は標準の値
+function ctAddTextBlock(tick, props) {
   const tps = scTps();
   const maxTick = scMaxTick();
-  let start = Math.round(curTick);
+  let start = Math.round(tick);
   if (maxTick > 0) start = Math.min(start, Math.max(0, maxTick - 1));
   let end = start + Math.round(tps * DEFAULT_TEXT_BLOCK_SECONDS);
   if (maxTick > 0) end = Math.min(end, maxTick);
@@ -31,6 +33,7 @@ function ctAddTextBlock() {
     startTick: start, endTick: Math.max(end, start + 1),
     content: 'テキスト', fontSize: 48, color: '#ffffff', weight: 700, anim: 'fade',
     x: 0.5, y: 0.82,
+    ...(props || {}),
   };
   textBlocks.push(block);
   return block;
@@ -60,27 +63,26 @@ function ctActiveTextBlocksAtTick(tick) {
   return textBlocks.filter(t => tick >= t.startTick && tick < t.endTick);
 }
 
-function actionAddText() {
+// 素材一覧から呼ばれる: 指定した時刻にテキストを追加して、編集パネルを開く
+function addTextAt(tick, props, label) {
   pushUndo();
-  const block = ctAddTextBlock();
+  const block = ctAddTextBlock(tick, props);
+  if (curTick < block.startTick || curTick >= block.endTick) seekTo(block.startTick);
   selectText(block.id);
   openEditPanel(block);
-  showToast('📝 テキストを追加しました。プレビュー上でドラッグして位置を決められます');
+  showToast(`📝 ${label || 'テキスト'}を追加しました。プレビュー上でドラッグして位置を決められます`);
   // 位置を決めやすいよう、プレビューが見える状態にする
   if (typeof sceneCameras !== 'undefined' && sceneCameras.length && typeof previewIsMain !== 'undefined') {
     if (typeof pilot !== 'undefined' && pilot) exitPilot(true);
     previewIsMain = true;
   }
+  return block;
 }
 
 
 // ============================================================
-// 初期化・タイムラインのテキスト行
+// タイムラインのテキスト行
 // ============================================================
-
-function contentBlocksInit() {
-  document.getElementById('addTextBlockBtn').addEventListener('click', (e) => { e.stopPropagation(); actionAddText(); });
-}
 
 // 時間が重なるブロックを、見やすいよう段に分ける(表示だけの話)
 function _ctAssignRows() {
@@ -111,7 +113,7 @@ function renderTextTrackBlocks() {
   if (!textBlocks.length) {
     const empty = document.createElement('div');
     empty.className = 'tlEmpty';
-    empty.innerText = '左の ＋ で、再生ヘッドの位置にテキストを追加できます';
+    empty.innerText = '左の素材一覧の「📝 テキスト」から追加できます(クリック、またはここへドラッグ)';
     lane.appendChild(empty);
   }
 }
@@ -130,11 +132,16 @@ function ctBuildBlockElement(block, row) {
   el.appendChild(label);
   _addResizeHandles(el);
 
-  el.addEventListener('mousedown', (e) => tlStartBlockDrag(e, 'text', block));
-  el.addEventListener('dblclick', (e) => {
-    e.stopPropagation();
-    selectText(block.id);
-    openEditPanel(block);
+  el.addEventListener('mousedown', (e) => {
+    // ダブルクリック(2回目の mousedown)。描き直しで要素が入れ替わっても確実に拾える
+    if (e.button === 0 && e.detail >= 2) {
+      e.stopPropagation(); e.preventDefault();
+      tlDrag = null;
+      selectText(block.id);
+      openEditPanel(block);
+      return;
+    }
+    tlStartBlockDrag(e, 'text', block);
   });
   return el;
 }

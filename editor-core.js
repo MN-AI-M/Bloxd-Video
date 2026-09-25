@@ -136,7 +136,6 @@ function getSelectedItem() {
 function editorChanged() {
   if (typeof timelineRefresh === 'function') timelineRefresh();
   if (typeof updatePinPVisibility === 'function') updatePinPVisibility();
-  if (typeof updateToolPalette === 'function') updateToolPalette();
 }
 
 
@@ -276,7 +275,6 @@ function setupEditorShortcuts() {
         if (typeof togglePlayback === 'function') togglePlayback();
         return;
       case 'KeyF': e.preventDefault(); actionNewCamera(); return;
-      case 'KeyG': e.preventDefault(); actionNextPoint(); return;
       case 'KeyK': e.preventDefault(); actionRecordKey(); return;
       case 'KeyV': e.preventDefault(); togglePilot(); return;
       case 'KeyB': e.preventDefault(); splitSelectionAtPlayhead(); return;

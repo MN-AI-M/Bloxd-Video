@@ -94,22 +94,41 @@
   #fovValue { min-width:30px; display:inline-block; text-align:right; color: var(--ink); }
   #fovSlider { width:96px; accent-color: var(--gold); }
 
-  /* 左: カメラ操作のツールボタン(キーを覚えていなくても、ここから全部できる) */
-  #toolPalette { position:absolute; left:12px; top:92px; z-index:6; max-height:calc(100% - 104px); overflow-y:auto;
-                 display:flex; flex-direction:column; gap:4px; padding:6px; width:64px; scrollbar-width:none; }
-  .toolBtn { position:relative; display:flex; flex-direction:column; align-items:center; gap:1px;
-             width:100%; padding:7px 2px 5px; border-radius:7px; border:1px solid transparent;
-             background:transparent; color: var(--ink); font-family: var(--font-ui); cursor:pointer; }
-  .toolBtn .ico { font-size:18px; line-height:1.1; }
-  .toolBtn .lbl { font-size:10px; color: var(--muted); line-height:1.25; text-align:center; }
-  .toolBtn .key { position:absolute; top:3px; right:4px; font-size:9px; color: var(--muted); opacity:.9; }
-  .toolBtn:hover:not(:disabled) { background: var(--surface-2); border-color: var(--border); }
-  .toolBtn.active { background: rgba(232,163,61,0.18); border-color: var(--gold); }
-  .toolBtn.active .lbl { color: var(--gold); }
-  .toolBtn:disabled { opacity:.35; cursor:not-allowed; }
-  .toolSep { height:1px; background: var(--border); margin:3px 4px; }
-  #toolSelection { font-size:9.5px; color: var(--muted); text-align:center; line-height:1.35; padding:4px 0 2px;
-                   word-break:break-all; }
+  /* ============================================================
+     左: 素材一覧(asset-library.js が中身を作る)
+     ============================================================ */
+  #editorMain { flex:1; min-height:0; display:flex; }
+  #assetPanel { flex-shrink:0; display:flex; background: var(--surface); border-right:1px solid var(--border); }
+  #assetRail { width:62px; flex-shrink:0; display:flex; flex-direction:column; gap:2px; padding:8px 5px;
+               border-right:1px solid var(--border); overflow-y:auto; scrollbar-width:none; }
+  .assetRailBtn { display:flex; flex-direction:column; align-items:center; gap:2px; padding:8px 2px 6px;
+                  border:none; border-radius:8px; background:transparent; color: var(--muted); cursor:pointer;
+                  font-family: var(--font-ui); }
+  .assetRailBtn .ico { font-size:19px; line-height:1.1; }
+  .assetRailBtn .lbl { font-size:10px; line-height:1.25; text-align:center; }
+  .assetRailBtn:hover { background: var(--surface-2); color: var(--ink); }
+  .assetRailBtn.active { background: rgba(232,163,61,0.16); color: var(--gold); }
+  .assetRailBtn.soon { opacity:.55; }
+  #assetList { width:230px; flex-shrink:0; overflow-y:auto; padding:12px 12px 16px; display:flex; flex-direction:column; gap:10px; }
+  #assetList.collapsed { display:none; }
+  .assetListTitle { font-family: var(--font-display); font-size:14px; font-weight:700; }
+  .assetGrid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; }
+  .assetCard { border:1px solid var(--border); border-radius:8px; background: var(--surface-2); padding:6px 6px 7px;
+               cursor:grab; user-select:none; transition: border-color .12s ease, transform .12s ease; }
+  .assetCard:hover { border-color: var(--gold); transform: translateY(-1px); }
+  .assetCard:active { cursor:grabbing; }
+  .assetThumb { height:46px; border-radius:6px; display:flex; align-items:center; justify-content:center;
+                font-size:22px; margin-bottom:5px; font-family: var(--font-display); color: var(--ink); }
+  .assetThumb.camera { background: linear-gradient(160deg, #3a2a0f, #1b1f27); }
+  .assetThumb.text { background: linear-gradient(160deg, #241f42, #1b1f27); }
+  .assetName { font-size:12px; font-weight:700; line-height:1.3; }
+  .assetDesc { font-size:10.5px; color: var(--muted); line-height:1.35; margin-top:1px; }
+  .assetHint { font-size:11px; color: var(--muted); line-height:1.6; }
+  .assetSoon { border:1px dashed var(--border); border-radius:8px; padding:14px 12px; font-size:12px; color: var(--muted); line-height:1.6; }
+  .assetSoon b { color: var(--ink); }
+  .assetSoon p { margin:6px 0 0; }
+  /* 素材をドラッグしている間は、落とせる場所を縁取りで示す */
+  body.assetDragging #timelineScroll, body.assetDragging #freecamArea { outline:2px dashed rgba(232,163,61,0.6); outline-offset:-3px; }
 
   /* 下: 今できる操作のヒント(状況に応じて変わる) */
   #contextHint { position:absolute; bottom:14px; left:50%; transform:translateX(-50%); z-index:5;
@@ -190,10 +209,6 @@
               border-right:1px solid var(--border); font-size:12px; }
   .tlHeader > span { white-space:nowrap; }
   .tlHeaderSub { font-size:10px; color: var(--muted); }
-  .tlAddBtn { margin-left:auto; width:22px; height:22px; border-radius:6px; border:none; cursor:pointer;
-              background: var(--gold); color: var(--gold-ink); font-size:14px; line-height:1; font-weight:700;
-              display:flex; align-items:center; justify-content:center; }
-  #addTextBlockBtn.tlAddBtn { background: var(--amethyst); color: var(--amethyst-ink); }
   .tlLane { position:relative; flex-shrink:0; height:100%; }
 
   /* ルーラー(上に張り付く) */
@@ -249,7 +264,7 @@
   #editPanelBody { padding:16px 18px 24px; overflow-y:auto; flex:1; display:flex; flex-direction:column; gap:14px; }
   .fieldRow { display:flex; align-items:center; gap:10px; }
   .fieldRow.column { flex-direction:column; align-items:stretch; gap:6px; }
-  .fieldRow > label { font-size:12.5px; color: var(--muted); min-width:64px; }
+  .fieldRow > label { font-size:12.5px; color: var(--muted); min-width:64px; white-space:nowrap; flex-shrink:0; }
   .fieldRow input[type="range"] { flex:1; accent-color: var(--gold); }
   .fieldValue { min-width:36px; text-align:right; font-variant-numeric: tabular-nums; font-size:12.5px; }
   .panelInput { flex:1; min-width:0; background: var(--surface-2); color: var(--ink); border:1px solid var(--border);
@@ -270,6 +285,13 @@
   .panelHint { font-size:12px; color: var(--muted); line-height:1.65; }
   .dangerBtn { color: var(--danger); border-color:#4a2222; justify-content:center; }
   .dangerBtn:hover:not(:disabled) { border-color: var(--danger); }
+  .fieldUnit { font-size:12px; color: var(--muted); }
+  .poseGrid { display:flex; flex-direction:column; gap:6px; }
+  .poseStatus { font-size:12px; line-height:1.5; padding:7px 10px; border-radius:7px; background: var(--surface-2); }
+  .poseStatus.onKey { color: var(--gold); }
+  .poseStatus.noKey { color: var(--ink); border:1px dashed var(--border); }
+  .poseStatus.warn { color:#F0A870; }
+  .fieldRow input[type="range"]:disabled { opacity:.35; }
   .colorInput { width:44px; height:28px; border:1px solid var(--border); border-radius:6px; background:none; cursor:pointer; padding:0; }
 
   .settingsRadioGroup { display:flex; gap:6px; flex-wrap:wrap; }
@@ -328,13 +350,10 @@
                            overflow:hidden; flex-shrink:0; }
   #playerTexturePreview img { width:100%; height:100%; object-fit:cover; image-rendering:pixelated; }
 
-  /* 画面の高さが低い時は、ツールボタンを アイコン+キー だけのコンパクト表示にする
-     (説明はマウスを乗せると出る) */
-  @media (max-height: 820px) {
-    #toolPalette { width:50px; padding:5px; gap:2px; }
-    .toolBtn { padding:6px 2px 4px; }
-    .toolBtn .lbl, #toolSelection { display:none; }
-    .toolBtn .ico { font-size:17px; }
+  /* 画面の幅が狭い時は、素材一覧のカードを1列にして幅を詰める */
+  @media (max-width: 1250px) {
+    #assetList { width:170px; }
+    .assetGrid { grid-template-columns: 1fr; }
   }
   @media (max-width: 1100px) {
     #frameInfo { display:none; }
@@ -382,6 +401,12 @@
 </div>
 
 <div id="editor">
+  <div id="editorMain">
+  <!-- 左: 素材一覧(カテゴリ+素材カード。asset-library.js が中身を作る) -->
+  <div id="assetPanel">
+    <div id="assetRail"></div>
+    <div id="assetList"></div>
+  </div>
   <div id="freecamArea">
     <canvas id="freecamCanvas" tabindex="-1"></canvas>
     <div id="freecamCrosshair"></div>
@@ -399,27 +424,9 @@
       <button id="helpBtn" class="btn btn-ghost btn-sm glass" title="操作ヘルプ (?)">？ 操作</button>
     </div>
 
-    <!-- カメラ操作のツールボタン(キーボードの F/G/K/V と同じことができる) -->
-    <div id="toolPalette" class="glass">
-      <button id="toolNewCamera" class="toolBtn" title="今見えている構図で、再生ヘッドの位置にカメラを置く (F)">
-        <span class="key">F</span><span class="ico">📷</span><span class="lbl">カメラを<br>置く</span></button>
-      <button id="toolNextPoint" class="toolBtn" title="選択中のカメラに、今の構図を次のポイントとして継ぎ足す (G)">
-        <span class="key">G</span><span class="ico">➕</span><span class="lbl">次の<br>ポイント</span></button>
-      <button id="toolRecordKey" class="toolBtn" title="今の構図を、再生ヘッドの時刻のキーとして記録 (K)">
-        <span class="key">K</span><span class="ico">◆</span><span class="lbl">キーを<br>記録</span></button>
-      <div class="toolSep"></div>
-      <button id="toolPilot" class="toolBtn" title="選択中のカメラの目線に入って、構図を直す (V)">
-        <span class="key">V</span><span class="ico">🎥</span><span class="lbl">カメラ<br>視点</span></button>
-      <button id="toolFly" class="toolBtn" title="マウスを捕まえて飛ぶ(トラックパッド向け)。Escで終了">
-        <span class="ico">✈</span><span class="lbl">飛行<br>モード</span></button>
-      <div class="toolSep"></div>
-      <button id="toolDelete" class="toolBtn" title="選択中のものを削除 (Delete)">
-        <span class="ico">🗑</span><span class="lbl">削除</span></button>
-      <div id="toolSelection">未選択</div>
-    </div>
-
     <div id="contextHint" class="glass"></div>
     <div id="toast"></div>
+  </div>
   </div>
 
   <div id="timelinePanel">
@@ -451,8 +458,7 @@
         </div>
         <div id="timelineCameraRows"></div>
         <div class="tlRow" id="timelineTextRow">
-          <div class="tlHeader"><span>📝 テキスト</span>
-            <button id="addTextBlockBtn" class="tlAddBtn" title="再生ヘッドの位置にテキストを追加">＋</button></div>
+          <div class="tlHeader"><span>📝 テキスト</span></div>
           <div class="tlLane" id="timelineTextLane"></div>
         </div>
         <div id="timelinePlayhead"></div>
@@ -476,31 +482,31 @@
   <div id="helpBox">
     <div id="helpHead"><h2>操作ヘルプ</h2><button id="helpClose">✕</button></div>
     <div class="helpFlow">
-      <b>基本の流れ:</b> 右ドラッグで見回しながら WASD で良いアングルへ →
-      <kbd>F</kbd> でカメラを置く → 再生ヘッドを進めて別の場所へ飛ぶ → <kbd>K</kbd> でキーを記録
-      (これで動くショットになります) → <kbd>Space</kbd> で再生して確認。<br>
-      構図を直したい時は、カメラを選んで <kbd>V</kbd>(カメラ視点)→ 動かして <kbd>K</kbd>。
+      <b>基本の流れ:</b> 左の素材一覧から「🎥 カメラ」を選んで追加(クリック、またはタイムラインへドラッグ)。
+      または、ドラッグで見回しながら WASD で良いアングルへ行って <kbd>F</kbd>。<br>
+      動かしたい時は、再生ヘッドを進めて別のアングルへ行き <kbd>K</kbd>(これで動くショットになります)。
+      細かい位置・角度は、タイムラインのカメラをダブルクリックして数値で直せます。<kbd>Space</kbd> で再生して確認。
     </div>
     <div class="helpCols">
       <div>
         <h3>視点の操作</h3>
         <table>
-          <tr><td>右ドラッグ(Alt+左ドラッグ)</td><td>見回す</td></tr>
-          <tr><td>WASD</td><td>移動(右ドラッグ中はさらに Space/Shift で上下)</td></tr>
+          <tr><td>何も無い所をドラッグ</td><td>見回す(左・右どちらのボタンでも)</td></tr>
+          <tr><td>WASD</td><td>移動(ドラッグ中は Space/Shift でも上下)</td></tr>
           <tr><td>Q / E</td><td>下降 / 上昇</td></tr>
-          <tr><td>右ドラッグ中にホイール</td><td>移動速度を変える</td></tr>
+          <tr><td>ドラッグ中にホイール</td><td>移動速度を変える</td></tr>
           <tr><td>ホイール</td><td>前後に移動</td></tr>
           <tr><td>中ボタンドラッグ</td><td>平行移動</td></tr>
-          <tr><td>✈ 飛行モード</td><td>マウスを捕まえて飛ぶ(トラックパッド向け、Escで終了)</td></tr>
         </table>
       </div>
       <div>
         <h3>カメラ</h3>
         <table>
+          <tr><td>素材一覧</td><td>後ろから・真上から・追いかける等のカメラを追加</td></tr>
           <tr><td><kbd>F</kbd></td><td>今の構図で、再生ヘッドの位置にカメラを置く</td></tr>
           <tr><td><kbd>K</kbd></td><td>今の構図を、再生ヘッドの時刻のキーとして記録</td></tr>
-          <tr><td><kbd>G</kbd></td><td>最後のポイントの2秒後に、今の構図を継ぎ足す</td></tr>
           <tr><td><kbd>V</kbd></td><td>選択中のカメラの目線に入る/戻る</td></tr>
+          <tr><td>カメラをダブルクリック</td><td>位置・角度・画角・表示位置を数値で直す(キーは自動で作られる)</td></tr>
           <tr><td>箱をクリック</td><td>そのカメラ・ポイントを選ぶ</td></tr>
           <tr><td>矢印 / リングをドラッグ</td><td>選んだポイントの位置 / 向きを直す</td></tr>
         </table>
@@ -560,6 +566,7 @@
      editor-core.js: 取り消し/やり直し・選択・キーボードショートカット・通知
      timeline.js: タイムラインと編集パネル
      content-blocks.js: テキストブロック
+     asset-library.js: 左の素材一覧(カメラ・テキストなどの追加)
      project-settings.js: プロジェクト設定
      ui.js: アップロード・Pyodide呼び出し・再生 -->
 <script src="shared.js"></script>
@@ -568,6 +575,7 @@
 <script src="editor-core.js"></script>
 <script src="timeline.js"></script>
 <script src="content-blocks.js"></script>
+<script src="asset-library.js"></script>
 <script src="project-settings.js"></script>
 <script src="ui.js"></script>
 </body>

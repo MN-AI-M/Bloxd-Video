@@ -10,8 +10,10 @@
 //     クリックするとそのキーを選んで、再生ヘッドがそこへ移動する
 //   - ブロックの端・再生ヘッド・◆ に吸着する(Altを押している間は吸着しない)
 //   - Ctrl/Cmd+ホイール(トラックパッドはピンチ)でズーム、「全体」で全体表示
-//   - ダブルクリック → 右側の編集パネル
+//   - ダブルクリック → 右側の編集パネル。カメラは、再生ヘッドの時刻の位置・角度を
+//     数値で直せる(その時刻にキーが無ければ自動で作られる)。表示位置も決められる
 //   - パネル上端の帯をドラッグ → タイムラインの高さを変える
+//   - 素材の追加は、左の素材一覧(asset-library.js)から行う
 //
 // 層(レイヤー): 明示的な「追加」操作は無く、カメラブロックを上の行へドラッグ
 // すると自動的に行が増える(重ならない場所まで戻せば自動的に減る)。
@@ -205,14 +207,6 @@ function timelineRenderBlocks() {
       sub.innerText = layer === maxLayer ? '手前' : (layer === 0 ? '奥' : `層${layer + 1}`);
       header.appendChild(sub);
     }
-    if (layer === maxLayer) {
-      const add = document.createElement('button');
-      add.className = 'tlAddBtn';
-      add.title = '今見えている構図で、再生ヘッドの位置にカメラを置く (F)';
-      add.innerText = '＋';
-      add.addEventListener('click', (e) => { e.stopPropagation(); actionNewCamera(); });
-      header.appendChild(add);
-    }
     const lane = document.createElement('div');
     lane.className = 'tlLane';
     lane.style.width = width + 'px';
@@ -222,7 +216,7 @@ function timelineRenderBlocks() {
     if (sceneCameras.length === 0) {
       const empty = document.createElement('div');
       empty.className = 'tlEmpty';
-      empty.innerText = 'F キー(または左の 📷 ボタン)で、今見えている構図のカメラをここに置けます';
+      empty.innerText = '左の素材一覧の「🎥 カメラ」から追加できます(クリック、またはここへドラッグ)/ F キーで今の視点のカメラ';
       lane.appendChild(empty);
     }
     row.appendChild(header);
@@ -304,6 +298,9 @@ function tlBuildCameraBlock(cam) {
   el.addEventListener('mousedown', (e) => {
     if (e.button !== 0) return;
     e.stopPropagation(); e.preventDefault();
+    // ダブルクリック。1回目のクリックでブロックが描き直されて要素が入れ替わるため、
+    // 'dblclick' イベントではなく2回目の mousedown(detail===2)で判定する
+    if (e.detail >= 2) { tlOpenCameraFromTimeline(cam, e.clientX); return; }
     const mode = e.target.classList.contains('left') ? 'resize-left'
       : e.target.classList.contains('right') ? 'resize-right' : 'move';
     beginEdit();
@@ -314,12 +311,19 @@ function tlBuildCameraBlock(cam) {
       origKeyTimes: cam.keys.map(k => k.time),
     };
   });
-  el.addEventListener('dblclick', (e) => {
-    e.stopPropagation();
-    selectCamera(cam.id, null, false);
-    openEditPanel(cam);
-  });
   return el;
+}
+
+function tlOpenCameraFromTimeline(cam, clientX) {
+  tlDrag = null;
+  // 再生ヘッドがこのカメラの外にある時は、ダブルクリックした時刻へ動かす
+  // (パネルの位置・角度は「再生ヘッドの時刻」の値を編集するため)
+  if (curTick < cam.startTick || curTick >= cam.endTick) {
+    if (typeof stopPlayback === 'function') stopPlayback();
+    seekTo(Math.max(cam.startTick, Math.min(cam.endTick - 1, tlTickFromClientX(clientX))));
+  }
+  selectCamera(cam.id, null, false);
+  openEditPanel(cam);
 }
 
 function _addResizeHandles(el) {
@@ -556,71 +560,132 @@ function bindEditUndo(el) {
   el.addEventListener('blur', () => setTimeout(commitEdit, 0));
 }
 
+// カメラの表示位置のひな形(書き出す映像の中での、左上の位置と幅。0〜1の割合)
+const DISPLAY_PRESETS = [
+  ['自動', null],
+  ['全画面', { x: 0, y: 0, w: 1 }],
+  ['右上', { x: 0.65, y: 0.03, w: 0.32 }],
+  ['左上', { x: 0.03, y: 0.03, w: 0.32 }],
+  ['右下', { x: 0.65, y: 0.65, w: 0.32 }],
+  ['左下', { x: 0.03, y: 0.65, w: 0.32 }],
+];
+
+// パネルの「再生ヘッドの時刻の位置・角度」欄。再生ヘッドが動くたびに
+// 表示を追従させる(syncCameraPanelToPlayhead)ために、要素を覚えておく
+let camPanel = null; // { camId, fields:{x,y,z,yaw,yawRange,pitch,pitchRange}, status }
+
+const _rad2deg = (r) => r * 180 / Math.PI;
+const _deg2rad = (d) => d * Math.PI / 180;
+function _normDeg(d) { return ((d + 180) % 360 + 360) % 360 - 180; }
+
+// パネルで編集する時刻(再生ヘッド。カメラの外にある時はカメラの端)
+function _camPanelTick(cam) { return Math.max(cam.startTick, Math.min(cam.endTick, curTick)); }
+
+function _el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.innerText = text;
+  return e;
+}
+
 function renderCameraEditFields(title, body, cam) {
-  title.innerText = `🎥 ${scCamName(cam)}` + (scCamIsStatic(cam) ? '(静的ショット)' : '(動くショット)');
+  title.innerText = `🎥 ${scCamName(cam)}` + (scCamIsStatic(cam) ? '(固定)' : '(動く)');
 
   // 名前
-  const nameRow = document.createElement('div');
-  nameRow.className = 'fieldRow';
-  nameRow.innerHTML = '<label>名前</label>';
+  const nameRow = _el('div', 'fieldRow');
+  nameRow.appendChild(_el('label', null, '名前'));
   const nameInput = document.createElement('input');
   nameInput.type = 'text'; nameInput.className = 'panelInput'; nameInput.value = scCamName(cam);
   bindEditUndo(nameInput);
-  nameInput.addEventListener('input', () => { cam.name = nameInput.value; timelineRenderBlocks(); updateToolPalette(); });
+  nameInput.addEventListener('input', () => { cam.name = nameInput.value; timelineRenderBlocks(); });
   nameRow.appendChild(nameInput);
   body.appendChild(nameRow);
 
-  // 画角
-  const fovRow = document.createElement('div');
-  fovRow.className = 'fieldRow';
-  fovRow.innerHTML = '<label>画角</label>';
+  // カメラの移動に関わる操作
+  const actions = _el('div', 'panelActions');
+  const mk = (text, fn, primary) => {
+    const b = _el('button', 'btn btn-sm ' + (primary ? 'btn-primary' : 'btn-ghost'), text);
+    b.addEventListener('click', fn);
+    actions.appendChild(b);
+  };
+  const inPilot = typeof pilot !== 'undefined' && pilot && pilot.camId === cam.id;
+  mk(inPilot ? '🎥 カメラ視点を終わる (V)' : '🎥 カメラ視点に入って動かす (V)', () => togglePilot(), true);
+  mk('◆ 今の視点を、再生ヘッドの時刻に記録 (K)', () => actionRecordKey());
+  mk('👁 このカメラが見える所へ移動', () => lookAtCameraFromOutside(cam));
+  body.appendChild(actions);
+
+  // ---- 再生ヘッドの時刻の位置・角度 ----
+  body.appendChild(_el('div', 'panelSectionLabel', '位置と角度(再生ヘッドの時刻)'));
+  const status = _el('div', 'poseStatus');
+  body.appendChild(status);
+
+  const fields = {};
+  const numRow = (label, key, step, unit) => {
+    const row = _el('div', 'fieldRow');
+    row.appendChild(_el('label', null, label));
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = String(step); inp.className = 'panelInput small';
+    bindEditUndo(inp);
+    inp.addEventListener('input', () => onCameraPoseInput(cam, key, parseFloat(inp.value)));
+    inp.addEventListener('change', () => editorChanged());
+    row.appendChild(inp);
+    if (unit) row.appendChild(_el('span', 'fieldUnit', unit));
+    fields[key] = inp;
+    return row;
+  };
+  const posRow = _el('div', 'poseGrid');
+  posRow.appendChild(numRow('X', 'x', 0.5));
+  posRow.appendChild(numRow('Y(高さ)', 'y', 0.5));
+  posRow.appendChild(numRow('Z', 'z', 0.5));
+  body.appendChild(posRow);
+
+  const angleRow = (label, key, min, max) => {
+    const row = _el('div', 'fieldRow');
+    row.appendChild(_el('label', null, label));
+    const range = document.createElement('input');
+    range.type = 'range'; range.min = String(min); range.max = String(max); range.step = '1';
+    const inp = document.createElement('input');
+    inp.type = 'number'; inp.step = '1'; inp.min = String(min); inp.max = String(max); inp.className = 'panelInput small';
+    bindEditUndo(range); bindEditUndo(inp);
+    range.addEventListener('input', () => { inp.value = range.value; onCameraPoseInput(cam, key, parseFloat(range.value)); });
+    inp.addEventListener('input', () => { range.value = inp.value; onCameraPoseInput(cam, key, parseFloat(inp.value)); });
+    range.addEventListener('change', () => editorChanged());
+    inp.addEventListener('change', () => editorChanged());
+    row.appendChild(range); row.appendChild(inp); row.appendChild(_el('span', 'fieldUnit', '°'));
+    fields[key] = inp; fields[key + 'Range'] = range;
+    return row;
+  };
+  body.appendChild(angleRow('左右の向き', 'yaw', -180, 180));
+  body.appendChild(angleRow('上下の向き', 'pitch', -88, 88));
+
+  // 画角(カメラ全体で共通。キーごとには変わらない)
+  const fovRow = _el('div', 'fieldRow');
+  fovRow.appendChild(_el('label', null, '画角'));
   const fovSlider = document.createElement('input');
   fovSlider.type = 'range'; fovSlider.min = '20'; fovSlider.max = '110'; fovSlider.value = cam.fov;
-  const fovValue = document.createElement('span');
-  fovValue.className = 'fieldValue';
-  fovValue.innerText = Math.round(cam.fov) + '°';
+  const fovValue = _el('span', 'fieldValue', Math.round(cam.fov) + '°');
   bindEditUndo(fovSlider);
   fovSlider.addEventListener('input', () => {
     cam.fov = parseInt(fovSlider.value); fovValue.innerText = cam.fov + '°';
-    if (typeof pilot !== 'undefined' && pilot && pilot.camId === cam.id) { fcFovDeg = cam.fov; syncFovSliderUI(); }
+    if (inPilot) { fcFovDeg = cam.fov; syncFovSliderUI(); }
   });
   fovRow.appendChild(fovSlider); fovRow.appendChild(fovValue);
   body.appendChild(fovRow);
+  body.appendChild(_el('div', 'panelHint', '位置・角度を変えると、再生ヘッドの時刻にキー(◆)が無ければ自動で作られます。画角はカメラ全体で共通です。'));
 
-  // 操作ボタン
-  const actions = document.createElement('div');
-  actions.className = 'panelActions';
-  const mk = (text, fn, primary) => {
-    const b = document.createElement('button');
-    b.className = 'btn btn-sm ' + (primary ? 'btn-primary' : 'btn-ghost');
-    b.innerText = text; b.addEventListener('click', fn);
-    actions.appendChild(b);
-  };
-  mk((typeof pilot !== 'undefined' && pilot && pilot.camId === cam.id) ? '🎥 カメラ視点を終わる (V)' : '🎥 カメラ視点に入る (V)', () => togglePilot(), true);
-  mk('◆ 再生ヘッドにキーを記録 (K)', () => actionRecordKey());
-  mk('➕ 次のポイントを追加 (G)', () => actionNextPoint());
-  body.appendChild(actions);
+  camPanel = { camId: cam.id, fields, status };
+  syncCameraPanelToPlayhead(true);
 
-  // キーの一覧
-  const listLabel = document.createElement('div');
-  listLabel.className = 'panelSectionLabel';
-  listLabel.innerText = 'ポイント(◆)の時刻 — ブロック先頭からの秒数';
-  body.appendChild(listLabel);
-
-  const listEl = document.createElement('div');
-  listEl.className = 'keyList';
+  // ---- ポイント(◆)の一覧 ----
+  body.appendChild(_el('div', 'panelSectionLabel', 'ポイント(◆)— クリックでその時刻へ'));
+  const listEl = _el('div', 'keyList');
   body.appendChild(listEl);
-
   cam.keys.forEach((k, i) => {
-    const row = document.createElement('div');
-    row.className = 'keyRow' + (i === selectedKeyIndex && cam.id === selectedCameraId ? ' active' : '');
-    const label = document.createElement('span');
-    label.className = 'keyRowLabel';
-    label.innerText = `◆ ポイント${i + 1}`;
+    const row = _el('div', 'keyRow' + (i === selectedKeyIndex && cam.id === selectedCameraId ? ' active' : ''));
+    row.appendChild(_el('span', 'keyRowLabel', `◆ ポイント${i + 1}`));
     const timeInput = document.createElement('input');
     timeInput.type = 'number'; timeInput.step = '0.1'; timeInput.className = 'panelInput small';
     timeInput.value = k.time.toFixed(2);
-    const unit = document.createElement('span'); unit.innerText = '秒';
     bindEditUndo(timeInput);
     timeInput.addEventListener('change', () => {
       const prev = cam.keys[i - 1], next = cam.keys[i + 1];
@@ -631,10 +696,11 @@ function renderCameraEditFields(title, body, cam) {
       if (v * scTps() + cam.startTick >= cam.endTick) cam.endTick = Math.min(tlMaxTick(), Math.ceil(cam.startTick + v * scTps()) + 1);
       editorChanged();
     });
-    row.appendChild(label); row.appendChild(timeInput); row.appendChild(unit);
+    row.appendChild(timeInput);
+    row.appendChild(_el('span', 'fieldUnit', '秒'));
     if (cam.keys.length > 1) {
-      const del = document.createElement('button');
-      del.className = 'keyRowDel'; del.title = 'このポイントを削除'; del.innerText = '✕';
+      const del = _el('button', 'keyRowDel', '✕');
+      del.title = 'このポイントを削除';
       del.addEventListener('click', (e) => {
         e.stopPropagation();
         pushUndo();
@@ -652,19 +718,126 @@ function renderCameraEditFields(title, body, cam) {
     listEl.appendChild(row);
   });
 
-  const hint = document.createElement('div');
-  hint.className = 'panelHint';
-  hint.innerText = '◆はタイムライン上で左右にドラッグしても時刻を変えられます。位置・向きは、3D画面のギズモ(矢印とリング)か、カメラ視点(V)で直してKで記録します。';
-  body.appendChild(hint);
+  // ---- 表示位置(書き出す映像の中のどこに、どの大きさで映すか) ----
+  body.appendChild(_el('div', 'panelSectionLabel', '画面の中での表示位置'));
+  const presetGroup = _el('div', 'settingsRadioGroup');
+  const cur = cam.display;
+  const sameDisplay = (a, b) => (!a && !b) || (a && b && Math.abs(a.x - b.x) < 1e-3 && Math.abs(a.y - b.y) < 1e-3 && Math.abs(a.w - b.w) < 1e-3);
+  for (const [label, d] of DISPLAY_PRESETS) {
+    const pill = _el('button', 'settingsRadioPill' + (sameDisplay(cur, d) ? ' active' : ''), label);
+    pill.type = 'button';
+    pill.addEventListener('click', () => {
+      if (sameDisplay(cam.display, d)) return;
+      pushUndo();
+      cam.display = d ? { ...d } : null;
+      _showCameraInPreview(cam);
+      editorChanged();
+    });
+    presetGroup.appendChild(pill);
+  }
+  body.appendChild(presetGroup);
 
-  const delBtn = document.createElement('button');
-  delBtn.className = 'btn btn-ghost btn-sm dangerBtn';
-  delBtn.innerText = '🗑 このカメラを削除';
+  const disp = cam.display ? scClampDisplay(cam.display) : null;
+  const dispSlider = (label, key, min, max) => {
+    const row = _el('div', 'fieldRow');
+    row.appendChild(_el('label', null, label));
+    const r = document.createElement('input');
+    r.type = 'range'; r.min = String(min); r.max = String(max); r.step = '1';
+    r.value = disp ? Math.round(disp[key] * 100) : (key === 'w' ? 100 : 0);
+    r.disabled = !disp;
+    const v = _el('span', 'fieldValue', r.value + '%');
+    bindEditUndo(r);
+    r.addEventListener('input', () => {
+      if (!cam.display) return;
+      const d = { ...cam.display, [key]: parseInt(r.value) / 100 };
+      cam.display = scClampDisplay(d);
+      v.innerText = r.value + '%';
+      _showCameraInPreview(cam);
+    });
+    r.addEventListener('change', () => editorChanged()); // 大きさを変えると動かせる範囲が変わるので作り直す
+    row.appendChild(r); row.appendChild(v);
+    body.appendChild(row);
+  };
+  dispSlider('大きさ', 'w', 10, 100);
+  dispSlider('横の位置', 'x', 0, 90);
+  dispSlider('縦の位置', 'y', 0, 90);
+  body.appendChild(_el('div', 'panelHint', '自動: 一番奥のカメラが全画面、同じ時間に重なった手前のカメラは右上に小窓で出ます。位置を決めると、そのカメラはいつもその位置・大きさで映ります(映っていない所は黒)。'));
+
+  const delBtn = _el('button', 'btn btn-ghost btn-sm dangerBtn', '🗑 このカメラを削除');
   delBtn.addEventListener('click', () => { selectCamera(cam.id, null, false); deleteSelection(); });
   body.appendChild(delBtn);
 }
 
+// 表示位置を変えた時、その結果が見えるようにプレビューを主画面にする
+function _showCameraInPreview(cam) {
+  if (curTick < cam.startTick || curTick >= cam.endTick) seekTo(cam.startTick);
+  if (typeof pilot !== 'undefined' && pilot) exitPilot(true);
+  if (typeof previewIsMain !== 'undefined') previewIsMain = true;
+}
+
+// 位置・角度の欄に入力された時: 再生ヘッドの時刻のキーを書き換える(無ければ作る)
+function onCameraPoseInput(cam, key, value) {
+  if (isNaN(value)) return; // 「-」だけ打った途中など
+  const tick = _camPanelTick(cam);
+  const pose = scPoseAtTick(cam, tick);
+  const patch = {};
+  if (key === 'x' || key === 'y' || key === 'z') {
+    const origin = [worldOriginX, worldOriginY, worldOriginZ];
+    const i = { x: 0, y: 1, z: 2 }[key];
+    const pos = pose.pos.slice();
+    pos[i] = value - origin[i];
+    patch.pos = pos;
+  } else if (key === 'yaw') {
+    patch.yaw = _deg2rad(value);
+  } else if (key === 'pitch') {
+    patch.pitch = _deg2rad(Math.max(-88, Math.min(88, value)));
+  }
+  const r = scEditPoseAtTick(cam, tick, patch);
+  selectedCameraId = cam.id; selectedKeyIndex = r.index; selectedKeyExplicit = true;
+  if (r.created) {
+    timelineRenderBlocks(); // 新しい◆をすぐタイムラインに出す
+    showToast(`◆ ${r.seconds.toFixed(1)}秒にキーを自動で作りました`);
+  }
+}
+
+// 毎フレーム呼ばれる(ui.jsのupdateScrubUIから)。再生ヘッドが動いたり、
+// ギズモやKで値が変わったりした時に、パネルの数値を追従させる。
+// 入力中・ドラッグ中の欄は書き換えない。
+function syncCameraPanelToPlayhead(force) {
+  if (!camPanel || !editPanelOpenFor || editPanelOpenFor.kind !== 'camera' || editPanelOpenFor.id !== camPanel.camId) return;
+  const cam = scGetCamera(camPanel.camId);
+  if (!cam) return;
+  const tick = _camPanelTick(cam);
+  const pose = scPoseAtTick(cam, tick);
+  const vals = {
+    x: (pose.pos[0] + worldOriginX).toFixed(1),
+    y: (pose.pos[1] + worldOriginY).toFixed(1),
+    z: (pose.pos[2] + worldOriginZ).toFixed(1),
+    yaw: String(Math.round(_normDeg(_rad2deg(pose.yaw)))),
+    pitch: String(Math.round(_rad2deg(pose.pitch))),
+  };
+  const active = document.activeElement;
+  for (const k of Object.keys(vals)) {
+    const inp = camPanel.fields[k];
+    if (!inp || inp === active) continue;
+    const range = camPanel.fields[k + 'Range'];
+    if (range && (range === active && editPanelPointerDown)) continue;
+    if (force || inp.value !== vals[k]) inp.value = vals[k];
+    if (range && range !== active && range.value !== vals[k]) range.value = vals[k];
+  }
+  const idx = scKeyIndexAtTick(cam, tick);
+  const sec = ((tick - cam.startTick) / scTps()).toFixed(1);
+  const outside = curTick < cam.startTick || curTick > cam.endTick;
+  let text, cls;
+  if (outside) { text = `再生ヘッドがこのカメラの時間の外です。編集はカメラの端(${sec}秒)に対して行われます`; cls = 'warn'; }
+  else if (idx >= 0) { text = `◆ ポイント${idx + 1}(${sec}秒)を編集しています`; cls = 'onKey'; }
+  else { text = `${sec}秒にはキーがありません — 値を変えると、ここに自動でキーが作られます`; cls = 'noKey'; }
+  if (camPanel.status.innerText !== text) camPanel.status.innerText = text;
+  camPanel.status.className = 'poseStatus ' + cls;
+}
+
 function closeEditPanel() {
+  camPanel = null;
   document.getElementById('editPanel').classList.remove('open');
   document.getElementById('editor').classList.remove('panelOpen');
   editPanelOpenFor = null;

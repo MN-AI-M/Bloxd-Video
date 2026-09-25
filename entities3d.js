@@ -307,19 +307,21 @@ function nearestFrameAtOrBefore(frames, tick) {
 // ============================================================
 // 配置済みカメラ = 🎥カメラトラックのブロック(キーフレーム方式)
 //
-// { id, kind:'camera', name, keys:[{time,pos,yaw,pitch}], fov, startTick, endTick, layer }
+// { id, kind:'camera', name, keys:[{time,pos,yaw,pitch}], fov, startTick, endTick, layer, display }
 //   keys: 「ブロックの先頭(startTick)からの秒数」ごとのカメラ位置・向き。
 //         1個なら静的ショット、2個以上なら動くショット(間をスプライン補間)。
 //         常にtimeの昇順に並べておく。ブロック左端を詰めた(トリム)時に
 //         負の時刻になることもある(評価時は端の値にクランプする)。
 //   layer: 0が一番奥(背景)、大きいほど手前(PinP合成時に前面に出る)。
+//   display: 書き出す映像の中での表示位置。null=自動(一番奥のカメラが全画面、
+//            手前のカメラは右上に小窓)。{x,y,w} は枠の左上の位置と幅(0〜1の割合)。
+//            小窓も書き出す映像と同じ縦横比なので、高さの割合は幅と同じ。
 //
 // ここはデータの操作だけを持つ。選択状態の切り替え・Undo・画面更新は
 // editor-core.js が担当する(選択中のIDの変数だけは描画でも使うのでここに置く)。
 // ============================================================
 
 const DEFAULT_BLOCK_SECONDS = 3;   // 新しいカメラの長さ
-const NEXT_POINT_GAP_SECONDS = 2;  // 「次のポイント(G)」で追加するキーの間隔
 const KEY_SNAP_SECONDS = 0.1;      // この差以内に既存キーがあれば、新規ではなく上書きにする
 
 let sceneCameras = [];
@@ -342,23 +344,26 @@ function scKeyAbsTick(cam, key) { return cam.startTick + key.time * scTps(); }
 function scCamLocalSeconds(cam, tick) { return (tick - cam.startTick) / scTps(); }
 function scCamName(cam) { return cam.name || ('カメラ' + cam.id); }
 
-function scCreateCamera(pose, fov, startTick) {
+// lengthSeconds を省略すると DEFAULT_BLOCK_SECONDS
+function scCreateCamera(pose, fov, startTick, lengthSeconds) {
   const tps = scTps();
   const maxTick = scMaxTick();
   let start = Math.max(0, Math.round(startTick));
   if (maxTick > 0) start = Math.min(start, Math.max(0, maxTick - 1));
-  let end = start + Math.round(tps * DEFAULT_BLOCK_SECONDS);
+  let end = start + Math.round(tps * (lengthSeconds || DEFAULT_BLOCK_SECONDS));
   if (maxTick > 0) end = Math.min(end, maxTick);
   const id = nextSceneCameraId++;
   const cam = {
     id, kind: 'camera', name: 'カメラ' + id,
     keys: [{ time: 0, ..._clonePose(pose) }],
-    fov, startTick: start, endTick: Math.max(end, start + 1), layer: 0,
+    fov, startTick: start, endTick: Math.max(end, start + 1), layer: 0, display: null,
   };
   cam.layer = scFindFreeLayerFrom(0, cam.startTick, cam.endTick, cam.id);
   sceneCameras.push(cam);
   return cam;
 }
+
+function _cloneDisplay(d) { return d ? { x: d.x, y: d.y, w: d.w } : null; }
 
 function scGetCamera(id) { return sceneCameras.find(c => c.id === id) || null; }
 function scGetSelected() { return scGetCamera(selectedCameraId); }
@@ -409,15 +414,35 @@ function scSetKeyAt(cam, seconds, pose) {
   return { index: cam.keys.indexOf(key), created: true };
 }
 
-// 最後のキーの gapSeconds 後に、キーを1つ継ぎ足す(ブロックも必要なら伸ばす)
-function scAppendKey(cam, pose, gapSeconds) {
-  const last = cam.keys[cam.keys.length - 1];
-  const time = (last ? last.time : 0) + (gapSeconds || NEXT_POINT_GAP_SECONDS);
-  const key = { time, ..._clonePose(pose) };
-  cam.keys.push(key);
-  scSortKeys(cam);
-  _extendCamToInclude(cam, cam.startTick + time * scTps());
-  return cam.keys.indexOf(key);
+// 指定tickに一番近い(KEY_SNAP_SECONDS以内の)キーの番号。無ければ -1
+function scKeyIndexAtTick(cam, tick) {
+  const s = scCamLocalSeconds(cam, tick);
+  return cam.keys.findIndex(k => Math.abs(k.time - s) <= KEY_SNAP_SECONDS);
+}
+
+// 再生ヘッドの時刻の位置・向きを書き換える(右パネルの数値編集で使う)。
+// その時刻にキーが無ければ、今の補間結果を元にキーを自動で作ってから書き換える。
+// patch: { pos?, yaw?, pitch? }  戻り値: { index, created, seconds }
+function scEditPoseAtTick(cam, tick, patch) {
+  const lenSec = (cam.endTick - cam.startTick) / scTps();
+  const s = Math.max(0, Math.min(lenSec, scCamLocalSeconds(cam, tick)));
+  let index = cam.keys.findIndex(k => Math.abs(k.time - s) <= KEY_SNAP_SECONDS);
+  let created = false;
+  if (index < 0) {
+    index = scSetKeyAt(cam, s, scEvalCamera(cam, s)).index;
+    created = true;
+  }
+  const k = cam.keys[index];
+  if (patch.pos) k.pos = patch.pos.slice();
+  if (patch.yaw != null) k.yaw = patch.yaw;
+  if (patch.pitch != null) k.pitch = Math.max(-Math.PI / 2 + 0.02, Math.min(Math.PI / 2 - 0.02, patch.pitch));
+  return { index, created, seconds: s };
+}
+
+// 表示位置({x,y,w})を枠の中に収まるよう整える
+function scClampDisplay(d) {
+  const w = Math.max(0.1, Math.min(1, d.w));
+  return { w, x: Math.max(0, Math.min(1 - w, d.x)), y: Math.max(0, Math.min(1 - w, d.y)) };
 }
 
 function scDeleteKey(cam, index) {
@@ -450,7 +475,7 @@ function scSplitCamera(cam, tick) {
   }
   const right = {
     id, kind: 'camera', name: 'カメラ' + id, keys: rightKeys, fov: cam.fov,
-    startTick: tick, endTick: cam.endTick, layer: cam.layer,
+    startTick: tick, endTick: cam.endTick, layer: cam.layer, display: _cloneDisplay(cam.display),
   };
   cam.keys = leftKeys;
   cam.endTick = tick;
@@ -468,7 +493,7 @@ function scDuplicateCamera(cam) {
   const dup = {
     id, kind: 'camera', name: 'カメラ' + id,
     keys: cam.keys.map(k => ({ ...k, pos: k.pos.slice() })),
-    fov: cam.fov, startTick: start, endTick: start + len, layer: cam.layer,
+    fov: cam.fov, startTick: start, endTick: start + len, layer: cam.layer, display: _cloneDisplay(cam.display),
   };
   dup.layer = scFindFreeLayerFrom(cam.layer, dup.startTick, dup.endTick, dup.id);
   sceneCameras.push(dup);

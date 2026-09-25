@@ -2,16 +2,14 @@
 // ============================================================
 // 3D画面(地形の描画・視点の操作・カメラの操作・プレビュー)。
 //
-// 視点操作(Unreal Engineと同じ方式):
-//   右ドラッグ(またはAlt+左ドラッグ)で見回す。押している間はWASDで移動、
-//   Q/E(またはSpace/Shift)で上下、ホイールで移動速度を変える。
-//   右ボタンを押していない時も、WASD/QEで移動できる(文字入力中を除く)。
-//   ホイールで前後、中ボタンドラッグで平行移動。
-//   左クリックは選択とギズモ操作だけ(空振りしても飛行モードに入らない)。
-//   従来の「マウスを捕まえて飛ぶ」操作は、✈ボタンの飛行モードとして残してある。
+// 視点操作:
+//   何も無い所をマウスで押したまま動かす(左でも右でも)と見回す。
+//   WASDで移動、Q/Eで上下(押したまま見回している間は Space/Shift でも上下)。
+//   ホイールで前後、見回している最中のホイールで移動速度、中ボタンドラッグで平行移動。
+//   カメラの箱をクリックすると選択、矢印・リングをドラッグすると位置・向きを直せる。
 //
-// カメラ操作(画面左のボタン、またはキー):
-//   F 新しいカメラ / G 次のポイント / K キーを記録 / V カメラ視点 / Delete 削除
+// カメラ操作(キー。素材一覧・右パネルのボタンからも同じことができる):
+//   F 今の視点でカメラを置く / K 再生ヘッドの時刻にキーを記録 / V カメラ視点 / Delete 削除
 //   カメラはキーフレーム方式(entities3d.js)。「今見えている構図を、
 //   再生ヘッドの時刻に記録する」が基本の考え方。
 // ============================================================
@@ -343,11 +341,13 @@ let previewIsMain = false;
 let dragState = null;          // ギズモをドラッグ中の情報
 const PINP_W = 220, PINP_H = 140, PINP_MARGIN = 14;
 
-// 視点操作(Unreal Engine方式)
-let navLook = false;           // 右ボタン(またはAlt+左)を押して見回している最中
+// 視点操作
+let navLook = false;           // マウスを押したまま動かして見回している最中
+let pendingLook = null;        // 何も無い所を左ボタンで押した直後(動かせば見回し、動かさず離せば選択解除)
+const LOOK_DRAG_THRESHOLD_PX = 4;
 let navPan = false;            // 中ボタンで平行移動している最中
 let mouseOverViewport = false;
-let fcMoveSpeed = 12;          // 移動速度(ブロック/秒)。右ドラッグ中のホイールで変える
+let fcMoveSpeed = 12;          // 移動速度(ブロック/秒)。見回している最中のホイールで変える
 const FC_MIN_SPEED = 1, FC_MAX_SPEED = 200;
 
 // カメラ視点モード(選択したカメラの目線に入って構図を直す)
@@ -356,9 +356,8 @@ const FC_MIN_SPEED = 1, FC_MAX_SPEED = 200;
 //   自分で動かすと dirty=true になり、Kで記録するまでその構図を保つ。
 let pilot = null;
 
-function isFlyMode() { return !!fcCanvas && document.pointerLockElement === fcCanvas; }
 // Space/Shiftを「上昇/下降」として扱う状態か(それ以外ではSpace=再生)
-function isFlightControlActive() { return navLook || isFlyMode(); }
+function isFlightControlActive() { return navLook; }
 
 function currentViewPose() { return { pos: fcPos.slice(), yaw: fcYaw, pitch: fcPitch }; }
 
@@ -441,9 +440,20 @@ function renderPreviewComposite(gl, isMain, tick) {
     gl.disable(gl.SCISSOR_TEST);
     return;
   }
-  const rects = computeSubRects(vx, vy, vw, vh, active.length);
-  active.forEach((cam, i) => {
-    const [rx, ry, rw, rh] = rects[i];
+  // 表示位置が「自動」のカメラは、奥から順に 全画面→右上の小窓… と並べる。
+  // 表示位置を決めたカメラ(cam.display)は、その位置・大きさで描く。
+  const autoRects = computeSubRects(vx, vy, vw, vh, active.filter(c => !c.display).length);
+  let autoIndex = 0;
+  active.forEach((cam) => {
+    let rx, ry, rw, rh;
+    if (cam.display) {
+      const d = scClampDisplay(cam.display);
+      rw = d.w * vw; rh = d.w * vh;
+      rx = vx + d.x * vw;
+      ry = vy + vh - (d.y * vh + rh); // WebGLのyは下から
+    } else {
+      [rx, ry, rw, rh] = autoRects[autoIndex++];
+    }
     const { view, proj } = _camViewProj(cam, rw / rh, tick);
     gl.scissor(rx, ry, rw, rh);
     gl.clearColor(0.4, 0.63, 0.9, 1);
@@ -456,7 +466,7 @@ function renderPreviewComposite(gl, isMain, tick) {
 
 
 // ============================================================
-// カメラの操作(画面左のツールボタン/キーボードの両方から呼ばれる)
+// カメラの操作(キーボード・素材一覧・右パネルから呼ばれる)
 // ============================================================
 
 function ensureEditView() { previewIsMain = false; }
@@ -464,28 +474,35 @@ function ensureEditView() { previewIsMain = false; }
 // F: 今見えている構図で、再生ヘッドの位置に新しいカメラを置く
 function actionNewCamera() {
   if (!fcActive) return;
-  ensureEditView();
-  if (pilot) exitPilot(false); // カメラ視点の構図のまま、新しいカメラにする
-  pushUndo();
-  const cam = scCreateCamera(currentViewPose(), fcFovDeg, curTick);
-  selectCamera(cam.id, 0, false);
-  showToast(`📷 ${scCamName(cam)}を置きました`);
+  addCameraAt(curTick, [{ time: 0, ...currentViewPose() }], {});
 }
 
-// G: 選択中のカメラに、最後のキーの2秒後の地点として今の構図を継ぎ足す
-// (飛ぶ→G→飛ぶ→G で動くショットができる)
-function actionNextPoint() {
-  const cam = scGetSelected();
-  if (!cam) { actionNewCamera(); return; }
-  ensureEditView();
+// カメラを追加する共通処理(F と 素材一覧 の両方から使う)。
+// keys: [{time, pos, yaw, pitch}](time はブロック先頭からの秒数)
+// opts: { seconds(長さ), name, toast }
+function addCameraAt(tick, keys, opts) {
+  opts = opts || {};
+  if (pilot) exitPilot(false); // カメラ視点の構図のまま、新しいカメラにする
   pushUndo();
-  if (pilot && pilot.camId === cam.id) cam.fov = fcFovDeg;
-  const idx = scAppendKey(cam, currentViewPose(), NEXT_POINT_GAP_SECONDS);
-  const key = cam.keys[idx];
-  seekTo(scKeyAbsTick(cam, key));
-  if (pilot) pilot.dirty = false;
-  selectCamera(cam.id, idx, true);
-  showToast(`➕ ${scCamName(cam)}にポイント${idx + 1}を追加(${key.time.toFixed(1)}秒)`);
+  const cam = scCreateCamera(keys[0], fcFovDeg, tick, opts.seconds);
+  if (keys.length > 1) cam.keys = keys.map(k => ({ time: k.time, pos: k.pos.slice(), yaw: k.yaw, pitch: k.pitch }));
+  if (opts.name) cam.name = opts.name + ' ' + cam.id;
+  selectCamera(cam.id, 0, false);
+  showToast(opts.toast || `📷 ${scCamName(cam)}を置きました`);
+  return cam;
+}
+
+// 選択中のカメラ(の再生ヘッド時刻の位置)が見える所へ、編集視点を動かす
+function lookAtCameraFromOutside(cam) {
+  if (!cam) return;
+  if (pilot) exitPilot(false);
+  previewIsMain = false;
+  const pose = scPoseAtTick(cam, curTick);
+  const { forward } = fcGetCameraVectors(pose.yaw, 0);
+  fcPos = [pose.pos[0] - forward[0] * 7, pose.pos[1] + 3, pose.pos[2] - forward[2] * 7];
+  const d = [pose.pos[0] - fcPos[0], pose.pos[1] - fcPos[1], pose.pos[2] - fcPos[2]];
+  fcYaw = Math.atan2(d[0], d[2]);
+  fcPitch = Math.atan2(d[1], Math.hypot(d[0], d[2]));
 }
 
 // Kを押した時に何が起きるか(ボタンのヒントと実際の動作で同じ判定を使う)
@@ -532,7 +549,6 @@ function togglePilot() { if (pilot) exitPilot(true); else enterPilot(); }
 function enterPilot() {
   const cam = scGetSelected();
   if (!cam) { showToast('先にカメラを選んでください(画面の箱 or タイムラインのブロックをクリック)'); return; }
-  if (isFlyMode()) document.exitPointerLock();
   previewIsMain = false;
   pilot = { camId: cam.id, saved: { pos: fcPos.slice(), yaw: fcYaw, pitch: fcPitch, fov: fcFovDeg }, dirty: false };
   syncPilotToCamera();
@@ -667,7 +683,6 @@ function setupFreecamControls() {
   document.addEventListener('mousemove', onDocMouseMove);
   document.addEventListener('mouseup', onDocMouseUp);
   fcCanvas.addEventListener('wheel', onViewportWheel, { passive: false });
-  document.addEventListener('pointerlockchange', () => editorChanged());
 }
 
 function _canvasMouse(e) {
@@ -677,38 +692,44 @@ function _canvasMouse(e) {
 
 function onViewportMouseDown(e) {
   if (!fcActive) return;
-  if (e.button === 2 || (e.button === 0 && e.altKey)) {
-    e.preventDefault();
-    navLook = true;
-    fcCanvas.style.cursor = 'grabbing';
-    return;
-  }
+  if (e.button === 2) { e.preventDefault(); startLook(); return; }
   if (e.button === 1) { e.preventDefault(); navPan = true; fcCanvas.style.cursor = 'move'; return; }
   if (e.button !== 0) return;
-  if (isFlyMode() || previewIsMain || pilot) return;
+  e.preventDefault();
+  fcCanvas.focus({ preventScroll: true }); // 入力欄からフォーカスを外して、キー操作が効くようにする
 
-  const [mx, my] = _canvasMouse(e);
-  const { view, proj } = _fcEditViewProj();
-  try {
-    const active = scGetActivePoint();
-    if (active) {
-      const part = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
-      if (part) { beginEdit(); beginGizmoDrag(part, active, mx, my); return; }
-    }
-    const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
-    if (picked) {
-      const cam = scGetCamera(picked.camId);
-      if (cam && !scCamIsStatic(cam)) {
-        if (typeof stopPlayback === 'function') stopPlayback();
-        seekTo(scKeyAbsTick(cam, cam.keys[picked.keyIndex]));
+  // カメラ視点・プレビュー表示中は、選べる物が無いので、そのまま見回しにする
+  if (!previewIsMain && !pilot) {
+    const [mx, my] = _canvasMouse(e);
+    const { view, proj } = _fcEditViewProj();
+    try {
+      const active = scGetActivePoint();
+      if (active) {
+        const part = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
+        if (part) { beginEdit(); beginGizmoDrag(part, active, mx, my); return; }
       }
-      selectCamera(picked.camId, picked.keyIndex, true);
-      return;
+      const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
+      if (picked) {
+        const cam = scGetCamera(picked.camId);
+        if (cam && !scCamIsStatic(cam)) {
+          if (typeof stopPlayback === 'function') stopPlayback();
+          seekTo(scKeyAbsTick(cam, cam.keys[picked.keyIndex]));
+        }
+        selectCamera(picked.camId, picked.keyIndex, true);
+        return;
+      }
+    } catch (err) {
+      console.error('ギズモの選択処理でエラーが起きました:', err);
     }
-  } catch (err) {
-    console.error('ギズモの選択処理でエラーが起きました:', err);
   }
-  if (getSelectedItem()) clearSelection();
+  // 何も無い所: 動かせば見回し、動かさずに離せば選択を外す
+  pendingLook = { x: e.clientX, y: e.clientY };
+}
+
+function startLook() {
+  pendingLook = null;
+  navLook = true;
+  fcCanvas.style.cursor = 'grabbing';
 }
 
 function onDocMouseMove(e) {
@@ -717,7 +738,11 @@ function onDocMouseMove(e) {
     applyGizmoDrag(mx, my);
     return;
   }
-  if (navLook || isFlyMode()) {
+  if (pendingLook) {
+    if (Math.hypot(e.clientX - pendingLook.x, e.clientY - pendingLook.y) < LOOK_DRAG_THRESHOLD_PX) return;
+    startLook();
+  }
+  if (navLook) {
     if (e.movementX || e.movementY) {
       fcYaw -= e.movementX * FC_MOUSE_SENSITIVITY;
       fcPitch -= e.movementY * FC_MOUSE_SENSITIVITY;
@@ -737,18 +762,14 @@ function onDocMouseMove(e) {
     return;
   }
   // マウスが乗っているギズモの部分を光らせる
-  if (mouseOverViewport && !pilot && !previewIsMain) {
+  if (mouseOverViewport && !pilot && !previewIsMain && e.target === fcCanvas) {
     const active = scGetActivePoint();
     let hover = null, overCam = false;
-    if (active) {
+    if (active || sceneCameras.length) {
       const [mx, my] = _canvasMouse(e);
       const { view, proj } = _fcEditViewProj();
-      hover = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
+      if (active) hover = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
       if (!hover) overCam = !!pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
-    } else if (sceneCameras.length) {
-      const [mx, my] = _canvasMouse(e);
-      const { view, proj } = _fcEditViewProj();
-      overCam = !!pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
     }
     gizmoHoverPart = hover;
     fcCanvas.style.cursor = hover ? 'grab' : (overCam ? 'pointer' : 'default');
@@ -761,9 +782,14 @@ function onDocMouseUp(e) {
     commitEdit();
     editorChanged();
   }
+  if (e.button === 0 && pendingLook) {
+    // 動かさずに離した = 何も無い所をクリックした
+    pendingLook = null;
+    if (!pilot && !previewIsMain && getSelectedItem()) clearSelection();
+  }
   if (navLook && (e.button === 2 || e.button === 0)) {
     navLook = false;
-    suppressContextMenuUntil = performance.now() + 400;
+    if (e.button === 2) suppressContextMenuUntil = performance.now() + 400;
   }
   if (e.button === 1) navPan = false;
   if (!navLook && !navPan && fcCanvas) fcCanvas.style.cursor = 'default';
@@ -771,7 +797,7 @@ function onDocMouseUp(e) {
 
 function onViewportWheel(e) {
   e.preventDefault();
-  if (navLook || isFlyMode()) {
+  if (navLook) {
     // 見回し中のホイール = 移動速度
     fcMoveSpeed = Math.max(FC_MIN_SPEED, Math.min(FC_MAX_SPEED, fcMoveSpeed * (e.deltaY < 0 ? 1.25 : 0.8)));
     showToast(`移動速度: ${fcMoveSpeed.toFixed(fcMoveSpeed < 10 ? 1 : 0)}`);
@@ -787,56 +813,9 @@ function onViewportWheel(e) {
 // 移動キーが押された時(editor-core.jsから呼ばれる)
 function onMovementKeyPressed() { /* 実際の移動は毎フレームの freecamLoop で行う */ }
 
-// ✈ 飛行モード(従来の「クリックでマウスを捕まえて飛ぶ」操作。トラックパッド向け)
-function startFlyMode() {
-  if (!fcCanvas) return;
-  if (isFlyMode()) { document.exitPointerLock(); return; }
-  previewIsMain = false;
-  const p = fcCanvas.requestPointerLock();
-  if (p && typeof p.catch === 'function') p.catch(() => showToast('飛行モードを開始できませんでした。画面をクリックしてから試してください'));
-}
-
-
 // ============================================================
-// 画面左のツールボタン・右下の小窓・画面上の表示
+// 右下の小窓・画面上の表示
 // ============================================================
-
-function setupToolPalette() {
-  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('click', fn); };
-  bind('toolNewCamera', actionNewCamera);
-  bind('toolNextPoint', actionNextPoint);
-  bind('toolRecordKey', actionRecordKey);
-  bind('toolPilot', togglePilot);
-  bind('toolFly', startFlyMode);
-  bind('toolDelete', deleteSelection);
-  updateToolPalette();
-}
-
-function updateToolPalette() {
-  const cam = scGetSelected();
-  const set = (id, disabled, active) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.disabled = !!disabled;
-    el.classList.toggle('active', !!active);
-  };
-  set('toolNewCamera', false, false);
-  set('toolNextPoint', false, false);
-  set('toolRecordKey', false, false);
-  set('toolPilot', !cam && !pilot, !!pilot);
-  set('toolFly', false, isFlyMode());
-  set('toolDelete', !getSelectedItem(), false);
-  const sel = document.getElementById('toolSelection');
-  if (sel) {
-    if (cam) {
-      sel.innerText = scCamIsStatic(cam) ? `選択中: ${scCamName(cam)}` :
-        `選択中: ${scCamName(cam)} ◆${(selectedKeyIndex ?? 0) + 1}/${cam.keys.length}`;
-    } else {
-      const it = getSelectedItem();
-      sel.innerText = it ? '選択中: テキスト' : '未選択';
-    }
-  }
-}
 
 // 右下の小窓(PinP)をクリックすると、主画面と入れ替わる
 function setupPinPInset() {
@@ -856,13 +835,13 @@ function updatePinPVisibility() {
 function currentModeLabel() {
   if (pilot) { const c = scGetCamera(pilot.camId); return `🎥 ${c ? scCamName(c) : ''}の視点`; }
   if (previewIsMain) return '🎬 プレビュー表示中';
-  if (isFlyMode()) return '✈ 飛行モード';
+  if (navLook) return '👀 見回し中';
   return '自由視点';
 }
 
 // 状況に応じた、画面下の操作ヒント
 function currentContextHint() {
-  if (isFlyMode()) return 'WASD移動・Space上昇・Shift下降・マウスで視点 / F:カメラを置く G:次のポイント K:キー記録 / Escで終了';
+  if (navLook) return 'WASD: 移動 / Space・Shift(またはE・Q): 上下 / ホイール: 移動速度';
   if (pilot) {
     const cam = scGetCamera(pilot.camId);
     let k = 'K: 記録';
@@ -870,21 +849,21 @@ function currentContextHint() {
       const p = planRecordKey(cam);
       k = p.mode === 'update' ? `K: ポイント${p.index + 1}をこの構図に更新` : `K: ${p.s.toFixed(1)}秒にキーを追加`;
     }
-    return `右ドラッグ+WASDで構図を調整 → ${k} / V・Escで戻る`;
+    return `ドラッグで見回す+WASDで構図を調整 → ${k} / V・Escで戻る`;
   }
   if (previewIsMain) return '書き出される映像のプレビュー / 右下の小窓クリック、または視点を動かすと編集視点に戻ります';
   const cam = scGetSelected();
   const active = scGetActivePoint();
   if (cam && active && isNearEye(active.pos)) {
-    return `今いる場所が${scCamName(cam)}の位置です(自分の中にあるので見えません)。S で少し下がると、カメラとギズモが見えます / Kで記録・Gで次のポイント`;
+    return `今いる場所が${scCamName(cam)}の位置です(自分の中にあるので見えません)。S で少し下がると、カメラとギズモが見えます / K:記録 / V:カメラ視点`;
   }
   if (cam) {
     const p = planRecordKey(cam);
     const k = p.mode === 'update' ? `K:ポイント${p.index + 1}を今の構図に更新`
       : (p.convert ? `K:${p.s.toFixed(1)}秒にキー(動くショットに)` : `K:${p.s.toFixed(1)}秒にキー`);
-    return `矢印ドラッグ=移動・リング=向き / V:カメラ視点 / G:次のポイント / ${k} / Delete:削除`;
+    return `矢印ドラッグ=移動・リング=向き / ${k} / V:カメラ視点 / ダブルクリック(タイムライン)で数値編集 / Delete:削除`;
   }
-  return '右ドラッグ: 見回す(押しながらWASDで移動・ホイールで速度) / ホイール: 前後 / 中ドラッグ: 平行移動 / F: ここにカメラを置く';
+  return 'ドラッグ: 見回す / WASD: 移動・Q/E: 上下 / ホイール: 前後 / 左の素材一覧、または F で今の視点にカメラを置く';
 }
 
 let _lastHint = '', _lastHud = '';
@@ -897,7 +876,7 @@ function updateViewportOverlays() {
   if (hud !== _lastHud) { document.getElementById('viewHud').innerText = hud; _lastHud = hud; }
 
   const ch = document.getElementById('freecamCrosshair');
-  if (ch) ch.style.display = (navLook || isFlyMode() || pilot) ? 'block' : 'none';
+  if (ch) ch.style.display = (navLook || pilot) ? 'block' : 'none';
 
   // カメラ視点モード: 書き出す縦横比の枠+三分割線
   const frame = document.getElementById('pilotFrame');
@@ -939,7 +918,7 @@ function renderFreecam() {
     renderHumanoids(fcGl, editVP.view, editVP.proj, _fcCurTickVal());
     renderCameraGizmos(fcGl, editVP.view, editVP.proj, W, H, { hideCamId: pilot ? pilot.camId : null });
     const active = scGetActivePoint();
-    if (active && !pilot && !isFlyMode() && !navLook) {
+    if (active && !pilot && !navLook) {
       renderTransformGizmo(fcGl, editVP.view, editVP.proj, active, W, H, dragState ? dragState.part : null);
     }
   }
@@ -1082,7 +1061,6 @@ async function initFreecamOnce() {
 
   initEntities3D(fcGl);
   setupPinPInset();
-  setupToolPalette();
   fcGoToPlayer();
 
   fcLastFrameTime = 0;
