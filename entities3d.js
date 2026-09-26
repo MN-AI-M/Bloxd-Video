@@ -338,6 +338,8 @@ function scMaxTick() {
 }
 
 function _clonePose(p) { return { pos: p.pos.slice(), yaw: p.yaw, pitch: p.pitch }; }
+// キーの複製(速さのカーブの配列も別物にする)
+function _cloneKey(k) { const c = { ...k, pos: k.pos.slice() }; if (k.curve) c.curve = k.curve.slice(); return c; }
 
 function scCamIsStatic(cam) { return cam.keys.length <= 1; }
 function scKeyAbsTick(cam, key) { return cam.startTick + key.time * scTps(); }
@@ -368,13 +370,8 @@ function _cloneDisplay(d) { return d ? { x: d.x, y: d.y, w: d.w } : null; }
 function scGetCamera(id) { return sceneCameras.find(c => c.id === id) || null; }
 function scGetSelected() { return scGetCamera(selectedCameraId); }
 
-// 今ギズモで動かす対象のキー(pos/yaw/pitchを持つオブジェクトそのもの)
-function scGetActivePoint() {
-  const cam = scGetSelected();
-  if (!cam || !cam.keys.length) return null;
-  const i = (selectedKeyIndex == null) ? 0 : Math.max(0, Math.min(cam.keys.length - 1, selectedKeyIndex));
-  return cam.keys[i];
-}
+// ギズモの位置(=再生ヘッドの時刻の姿勢のコピー)。互換のため残している名前
+function scGetActivePoint() { return scGizmoPose(); }
 
 // 再生ヘッドに一番近いキーの番号
 function scNearestKeyIndex(cam, tick) {
@@ -408,6 +405,10 @@ function scSetKeyAt(cam, seconds, pose) {
     return { index: existing, created: false };
   }
   const key = { time: seconds, ..._clonePose(pose) };
+  // 区間の途中に足した時は、その区間の速さのカーブを引き継ぐ
+  let prev = null;
+  for (const k of cam.keys) if (k.time < seconds) prev = k;
+  if (prev && prev.curve) key.curve = prev.curve.slice();
   cam.keys.push(key);
   scSortKeys(cam);
   _extendCamToInclude(cam, cam.startTick + seconds * scTps());
@@ -420,12 +421,24 @@ function scKeyIndexAtTick(cam, tick) {
   return cam.keys.findIndex(k => Math.abs(k.time - s) <= KEY_SNAP_SECONDS);
 }
 
+// 編集の対象になる秒数(再生ヘッドの時刻。ブロックの外なら端に寄せる)
+function scEditSeconds(cam, tick) {
+  const lenSec = (cam.endTick - cam.startTick) / scTps();
+  return Math.max(0, Math.min(lenSec, scCamLocalSeconds(cam, tick)));
+}
+
+// 3D画面のカメラの本体・ギズモを出す位置(選択中カメラの、再生ヘッドの時刻の姿勢)
+function scGizmoPose() {
+  const cam = scGetSelected();
+  if (!cam || !cam.keys.length) return null;
+  return scEvalCamera(cam, scEditSeconds(cam, curTick));
+}
+
 // 再生ヘッドの時刻の位置・向きを書き換える(右パネルの数値編集で使う)。
 // その時刻にキーが無ければ、今の補間結果を元にキーを自動で作ってから書き換える。
 // patch: { pos?, yaw?, pitch? }  戻り値: { index, created, seconds }
 function scEditPoseAtTick(cam, tick, patch) {
-  const lenSec = (cam.endTick - cam.startTick) / scTps();
-  const s = Math.max(0, Math.min(lenSec, scCamLocalSeconds(cam, tick)));
+  const s = scEditSeconds(cam, tick);
   let index = cam.keys.findIndex(k => Math.abs(k.time - s) <= KEY_SNAP_SECONDS);
   let created = false;
   if (index < 0) {
@@ -464,14 +477,15 @@ function scSplitCamera(cam, tick) {
   const id = nextSceneCameraId++;
   let leftKeys, rightKeys;
   if (scCamIsStatic(cam)) {
-    leftKeys = cam.keys.map(k => ({ ...k, pos: k.pos.slice() }));
-    rightKeys = cam.keys.map(k => ({ ...k, time: 0, pos: k.pos.slice() }));
+    leftKeys = cam.keys.map(_cloneKey);
+    rightKeys = cam.keys.map(k => ({ ..._cloneKey(k), time: 0 }));
   } else {
     const eps = 0.02;
-    leftKeys = cam.keys.filter(k => k.time < s - eps).map(k => ({ ...k, pos: k.pos.slice() }));
+    leftKeys = cam.keys.filter(k => k.time < s - eps).map(_cloneKey);
+    const seg = cam.keys.filter(k => k.time < s - eps).pop();
     leftKeys.push({ time: s, ..._clonePose(pose) });
-    rightKeys = [{ time: 0, ..._clonePose(pose) }];
-    for (const k of cam.keys) if (k.time > s + eps) rightKeys.push({ ...k, time: k.time - s, pos: k.pos.slice() });
+    rightKeys = [{ time: 0, ..._clonePose(pose), ...(seg && seg.curve ? { curve: seg.curve.slice() } : {}) }];
+    for (const k of cam.keys) if (k.time > s + eps) rightKeys.push({ ..._cloneKey(k), time: k.time - s });
   }
   const right = {
     id, kind: 'camera', name: 'カメラ' + id, keys: rightKeys, fov: cam.fov,
@@ -492,7 +506,7 @@ function scDuplicateCamera(cam) {
   const id = nextSceneCameraId++;
   const dup = {
     id, kind: 'camera', name: 'カメラ' + id,
-    keys: cam.keys.map(k => ({ ...k, pos: k.pos.slice() })),
+    keys: cam.keys.map(_cloneKey),
     fov: cam.fov, startTick: start, endTick: start + len, layer: cam.layer, display: _cloneDisplay(cam.display),
   };
   dup.layer = scFindFreeLayerFrom(cam.layer, dup.startTick, dup.endTick, dup.id);
@@ -560,6 +574,58 @@ function catmullRomPos(positions, i, t) {
   return [0, 1, 2].map(k => catmullRom1D(p0[k], p1[k], p2[k], p3[k], t));
 }
 
+// ============================================================
+// 速さのカーブ(キーとキーの間の、進み方)。
+// 各キーの curve = 次のキーまでの区間の [x1,y1,x2,y2](CSSの cubic-bezier と同じ意味)。
+// 横軸=区間の中の時間(0→1)、縦軸=次のポイントまでの進み具合(0→1)。
+// 無い時は等速(直線)。
+// ============================================================
+
+const CURVE_PRESETS = {
+  linear:  { label: '等速',           c: [1/3, 1/3, 2/3, 2/3] },
+  smooth:  { label: 'なめらか',       c: [0.42, 0, 0.58, 1] },
+  easeIn:  { label: 'ゆっくり始まる', c: [0.42, 0, 1, 1] },
+  easeOut: { label: 'ゆっくり止まる', c: [0, 0, 0.58, 1] },
+};
+
+function scKeyCurve(key) { return (key && key.curve) || CURVE_PRESETS.linear.c; }
+
+// どのプリセットと同じか(違えば null = カスタム)
+function scCurvePresetId(curve) {
+  const c = curve || CURVE_PRESETS.linear.c;
+  for (const [id, p] of Object.entries(CURVE_PRESETS)) {
+    if (p.c.every((v, i) => Math.abs(v - c[i]) < 1e-3)) return id;
+  }
+  return null;
+}
+
+function _bez(p1, p2, t) { const u = 1 - t; return 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t; }
+function _bezD(p1, p2, t) { const u = 1 - t; return 3 * u * u * p1 + 6 * u * t * (p2 - p1) + 3 * t * t * (1 - p2); }
+
+// 区間の中の時間 x(0〜1)→ 進み具合(0〜1)
+function scEase(curve, x) {
+  if (!curve) return x;
+  const [x1, y1, x2, y2] = curve;
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  let t = x;
+  for (let i = 0; i < 8; i++) {            // ニュートン法
+    const err = _bez(x1, x2, t) - x;
+    if (Math.abs(err) < 1e-6) return _bez(y1, y2, t);
+    const d = _bezD(x1, x2, t);
+    if (Math.abs(d) < 1e-6) break;
+    t = Math.max(0, Math.min(1, t - err / d));
+  }
+  let lo = 0, hi = 1; t = x;               // うまくいかない時は二分法
+  for (let i = 0; i < 30; i++) {
+    const v = _bez(x1, x2, t);
+    if (Math.abs(v - x) < 1e-6) break;
+    if (v < x) lo = t; else hi = t;
+    t = (lo + hi) / 2;
+  }
+  return _bez(y1, y2, t);
+}
+
 // 指定した秒数(ブロック先頭から)における位置・向き。範囲外は端のキーにクランプ。
 function scEvalCamera(cam, time) {
   const ks = cam.keys;
@@ -571,7 +637,7 @@ function scEvalCamera(cam, time) {
   while (i < ks.length - 2 && time > ks[i + 1].time) i++;
   const a = ks[i], b = ks[i + 1];
   const span = (b.time - a.time) || 1;
-  const t = Math.max(0, Math.min(1, (time - a.time) / span));
+  const t = scEase(a.curve, Math.max(0, Math.min(1, (time - a.time) / span)));
 
   const pos = catmullRomPos(ks.map(k => k.pos), i, t);
   const dyaw = Math.atan2(Math.sin(b.yaw - a.yaw), Math.cos(b.yaw - a.yaw)); // 最短経路で回る
@@ -660,41 +726,64 @@ function isNearEye(pos) {
   return Math.hypot(pos[0] - fcPos[0], pos[1] - fcPos[1], pos[2] - fcPos[2]) < NEAR_EYE_DIST;
 }
 
+// カメラの本体を出す姿勢: 再生ヘッドの時刻(ブロックの外なら端)の姿勢。
+// キーの数に関係なく、1台のカメラは1つの箱で描く。キーは軌道の上の小さな◆で示す。
+function scBodyPose(cam) { return scEvalCamera(cam, scEditSeconds(cam, curTick)); }
+function _camOnAir(cam) { return curTick >= cam.startTick && curTick < cam.endTick; }
+
+const CAM_COLOR_OFFAIR = [0.42, 0.47, 0.45]; // 再生ヘッドの時刻に映っていないカメラ
+const KEY_MARK_PX = 6;                        // ◆の大きさ(画面ピクセル)
+
+// 画面に正対した◆の4辺(3D上の線分の組)
+function _keyDiamondSegments(pos, px) {
+  const { right, up } = fcGetCameraVectors(fcYaw, fcPitch);
+  const s = px * worldUnitsPerPixelAt(pos);
+  const P = (dx, dy) => [0, 1, 2].map(i => pos[i] + right[i] * dx * s + up[i] * dy * s);
+  const t = P(0, 1), r = P(1, 0), b = P(0, -1), l = P(-1, 0);
+  return [t, r, r, b, b, l, l, t, P(0, 0.45), P(0, -0.45), P(-0.45, 0), P(0.45, 0)];
+}
+
 // opts.hideCamId: カメラ視点モード中など、描かないカメラ
 function renderCameraGizmos(gl, viewMatrix, projMatrix, canvasW, canvasH, opts) {
   if (!ent3dProgram || sceneCameras.length === 0) return;
   const hideId = opts && opts.hideCamId;
 
+  // カメラの本体(1台につき1つ)
   _bindGizmoMesh(gl, viewMatrix, projMatrix);
   for (const cam of sceneCameras) {
     if (cam.id === hideId) continue;
-    const isSel = cam.id === selectedCameraId;
-    cam.keys.forEach((k, i) => {
-      if (isNearEye(k.pos)) return;
-      gl.uniformMatrix4fv(ent3dUModelLoc, false, modelMatrixPose(k.pos, k.yaw, k.pitch, _camBoxScale(k.pos)));
-      const c = isSel ? (i === selectedKeyIndex ? CAM_COLOR_ACTIVE_KEY : CAM_COLOR_SELECTED) : CAM_COLOR_IDLE;
-      gl.uniform3f(ent3dUTintLoc, c[0], c[1], c[2]);
-      gl.drawArrays(gl.TRIANGLES, 0, gizmoVertexCount);
-    });
+    const pose = scBodyPose(cam);
+    if (isNearEye(pose.pos)) continue;
+    gl.uniformMatrix4fv(ent3dUModelLoc, false, modelMatrixPose(pose.pos, pose.yaw, pose.pitch, _camBoxScale(pose.pos)));
+    const c = cam.id === selectedCameraId ? CAM_COLOR_SELECTED : (_camOnAir(cam) ? CAM_COLOR_IDLE : CAM_COLOR_OFFAIR);
+    gl.uniform3f(ent3dUTintLoc, c[0], c[1], c[2]);
+    gl.drawArrays(gl.TRIANGLES, 0, gizmoVertexCount);
   }
 
-  // 動くショットは、キーを繋ぐ軌道もガイドとして描く
+  // 動くショットは、軌道の線と、各ポイントの◆
   for (const cam of sceneCameras) {
     if (cam.id === hideId || scCamIsStatic(cam)) continue;
+    const isSel = cam.id === selectedCameraId;
     const curve = scSampleCameraCurve(cam, 12);
     const pairs = [];
     for (let i = 0; i < curve.length - 1; i++) pairs.push(curve[i], curve[i + 1]);
-    const col = cam.id === selectedCameraId ? GIZMO_PATH_COLOR : [0.55, 0.6, 0.5];
-    _drawLineSegments(gl, viewMatrix, projMatrix, pairs, col, canvasW, canvasH, 2.5);
+    _drawLineSegments(gl, viewMatrix, projMatrix, pairs, isSel ? GIZMO_PATH_COLOR : [0.55, 0.6, 0.5], canvasW, canvasH, 2.5);
+    const onKey = isSel ? scKeyIndexAtTick(cam, curTick) : -1;
+    cam.keys.forEach((k, i) => {
+      if (isNearEye(k.pos)) return;
+      const hot = i === onKey;
+      const col = hot ? CAM_COLOR_ACTIVE_KEY : (isSel ? [0.97, 0.95, 0.9] : [0.7, 0.74, 0.68]);
+      _drawLineSegments(gl, viewMatrix, projMatrix, _keyDiamondSegments(k.pos, hot ? KEY_MARK_PX * 1.5 : KEY_MARK_PX),
+        col, canvasW, canvasH, hot ? 3 : 2.2);
+    });
   }
 
   // 選択中のカメラは、「再生ヘッドの時刻に実際どこから・どちらを向いて
   // 撮っているか」を視野枠(四角錐)で見せる
   const sel = scGetSelected();
-  const selPose = sel ? scPoseAtTick(sel, curTick) : null;
+  const selPose = sel ? scBodyPose(sel) : null;
   if (sel && sel.id !== hideId && !isNearEye(selPose.pos)) {
-    const pose = selPose;
-    _drawLineSegments(gl, viewMatrix, projMatrix, frustumSegments(pose, sel.fov), FRUSTUM_COLOR, canvasW, canvasH, 2);
+    _drawLineSegments(gl, viewMatrix, projMatrix, frustumSegments(selPose, sel.fov), FRUSTUM_COLOR, canvasW, canvasH, 2);
   }
 }
 
@@ -725,24 +814,24 @@ function projectToScreen(pos, viewMatrix, projMatrix, canvasWidth, canvasHeight)
   };
 }
 
-// クリック位置に一番近いカメラのキー(無ければnull)。hideCamIdのカメラは対象外。
+// クリック位置に一番近いカメラの本体、または動くショットの◆(無ければnull)。
+// 戻り値: { camId, kind:'body'|'key', keyIndex, pos }
 function pickCameraGizmo(clickX, clickY, viewMatrix, projMatrix, canvasWidth, canvasHeight, hideCamId) {
   let best = null, bestDist = 26;
-  for (const p of scAllPoints()) {
-    if (p.camId === hideCamId || isNearEye(p.pos)) continue;
-    const screen = projectToScreen(p.pos, viewMatrix, projMatrix, canvasWidth, canvasHeight);
-    if (!screen) continue;
+  const consider = (cand, radius) => {
+    if (cand.camId === hideCamId || isNearEye(cand.pos)) return;
+    const screen = projectToScreen(cand.pos, viewMatrix, projMatrix, canvasWidth, canvasHeight);
+    if (!screen) return;
     const d = Math.hypot(screen.x - clickX, screen.y - clickY);
-    if (d < bestDist) { bestDist = d; best = p; }
+    if (d < Math.min(bestDist, radius)) { bestDist = d; best = cand; }
+  };
+  for (const cam of sceneCameras) {
+    if (!scCamIsStatic(cam)) cam.keys.forEach((k, i) => consider({ camId: cam.id, kind: 'key', keyIndex: i, pos: k.pos }, 12));
   }
-  return best; // { camId, keyIndex, pos } | null
+  // 本体は◆より少し広めに当たる。◆と重なっている時は◆が優先(距離が同じなら先に見た方)
+  for (const cam of sceneCameras) consider({ camId: cam.id, kind: 'body', keyIndex: null, pos: scBodyPose(cam).pos }, 26);
+  return best;
 }
-
-
-// ============================================================
-// 移動ギズモ(XYZ矢印+XZ平面ハンドル)・回転ギズモ(左右/上下リング)
-// 画面上で常に同じ大きさ(gizmoScaleAt)で描き、マウスが乗った部分は光らせる。
-// ============================================================
 
 const GIZMO_ARROW_LEN = 2.6;
 const GIZMO_ARROW_START = 0.55;

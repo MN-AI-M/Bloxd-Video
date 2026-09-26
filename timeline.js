@@ -24,6 +24,7 @@ const TL_HEADER_W = 136;   // 左側のトラック名の列の幅(CSSの --tl-h
 const TL_ROW_H = 34;
 const TL_MIN_PPS = 4, TL_MAX_PPS = 320;
 const TL_SNAP_PX = 8;
+const TL_EXPANDED_H = 124; // 編集パネルを開いているカメラの行の高さ(速さのカーブのグラフを出す)
 
 let tlPxPerSecond = 60;
 let tlDrag = null;
@@ -210,8 +211,11 @@ function timelineRenderBlocks() {
     const lane = document.createElement('div');
     lane.className = 'tlLane';
     lane.style.width = width + 'px';
+    const expId = tlExpandedCamId();
     for (const cam of sceneCameras) {
-      if (cam.layer === layer) lane.appendChild(tlBuildCameraBlock(cam));
+      if (cam.layer !== layer) continue;
+      lane.appendChild(tlBuildCameraBlock(cam));
+      if (cam.id === expId) { row.style.height = TL_EXPANDED_H + 'px'; row.classList.add('expanded'); }
     }
     if (sceneCameras.length === 0) {
       const empty = document.createElement('div');
@@ -293,6 +297,13 @@ function tlBuildCameraBlock(cam) {
     el.appendChild(d);
   });
 
+  // 編集パネルを開いているカメラは、ブロックを縦に広げて速さのカーブのグラフを出す
+  if (cam.id === tlExpandedCamId()) {
+    el.classList.add('expanded');
+    el.style.height = (TL_EXPANDED_H - 7) + 'px';
+    el.appendChild(tlBuildCurveGraph(cam, widthPx, TL_EXPANDED_H - 7));
+  }
+
   _addResizeHandles(el);
 
   el.addEventListener('mousedown', (e) => {
@@ -324,6 +335,137 @@ function tlOpenCameraFromTimeline(cam, clientX) {
   }
   selectCamera(cam.id, null, false);
   openEditPanel(cam);
+}
+
+// ============================================================
+// 速さのカーブのグラフ(広げたカメラブロックの中)
+//   横 = 時間、縦 = 次のポイントまでの進み具合(下=前のポイント、上=次のポイント)。
+//   区間ごとに S 字などの曲線を描き、○(ハンドル)をドラッグすると形が変わる。
+//   傾きが急な所ほど速く動き、平らな所ほどゆっくり動く。
+// ============================================================
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const TL_GRAPH_TOP = 22, TL_GRAPH_BOTTOM = 20; // ラベルと◆のぶん上下を空ける
+
+function tlExpandedCamId() {
+  return (editPanelOpenFor && editPanelOpenFor.kind === 'camera') ? editPanelOpenFor.id : null;
+}
+
+function _svg(tag, attrs) {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+function tlBuildCurveGraph(cam, widthPx, blockH) {
+  const wrap = document.createElement('div');
+  wrap.className = 'tlCurveGraph';
+  wrap.style.top = TL_GRAPH_TOP + 'px';
+  wrap.style.height = (blockH - TL_GRAPH_TOP - TL_GRAPH_BOTTOM) + 'px';
+  if (scCamIsStatic(cam)) {
+    wrap.appendChild(_el('div', 'tlCurveEmpty', '固定カメラ — ポイントが2つ以上になると、ここで動きの速さ(なめらかさ)を調整できます'));
+    return wrap;
+  }
+  const svg = _svg('svg', { width: widthPx, height: blockH - TL_GRAPH_TOP - TL_GRAPH_BOTTOM });
+  wrap.appendChild(svg);
+  _drawCurveGraph(svg, cam);
+  return wrap;
+}
+
+function _curveSegGeom(cam, i, H) {
+  const pps = tlPxPerSecond;
+  const a = cam.keys[i], b = cam.keys[i + 1];
+  const x0 = a.time * pps, x1 = b.time * pps;
+  return { x0, x1, w: x1 - x0, yb: H - 4, H: H - 8 }; // 上下4pxの余白
+}
+
+function _drawCurveGraph(svg, cam) {
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  const H = parseFloat(svg.getAttribute('height'));
+  const segAtHead = tlCurveSegmentAt(cam, curTick);
+  // 目盛り(下=前のポイント、上=次のポイント)
+  svg.appendChild(_svg('line', { x1: 0, x2: svg.getAttribute('width'), y1: 4, y2: 4, class: 'tlCurveGrid' }));
+  svg.appendChild(_svg('line', { x1: 0, x2: svg.getAttribute('width'), y1: H - 4, y2: H - 4, class: 'tlCurveGrid' }));
+  for (let i = 0; i < cam.keys.length - 1; i++) {
+    const g = _curveSegGeom(cam, i, H);
+    if (g.w <= 1) continue;
+    const c = scKeyCurve(cam.keys[i]);
+    const P = (nx, ny) => [g.x0 + nx * g.w, g.yb - ny * g.H];
+    const [ax, ay] = P(0, 0), [bx, by] = P(1, 1), [h1x, h1y] = P(c[0], c[1]), [h2x, h2y] = P(c[2], c[3]);
+    const hot = i === segAtHead;
+    // 区間の背景(再生ヘッドがある区間は少し明るく)
+    svg.appendChild(_svg('rect', { x: g.x0, y: 2, width: g.w, height: H - 4, class: 'tlCurveSeg' + (hot ? ' hot' : '') }));
+    svg.appendChild(_svg('line', { x1: g.x0, x2: g.x0, y1: 2, y2: H - 2, class: 'tlCurveKeyLine' }));
+    // 曲線と、その下の塗り
+    svg.appendChild(_svg('path', { d: `M${ax},${ay} C${h1x},${h1y} ${h2x},${h2y} ${bx},${by} L${bx},${ay} Z`, class: 'tlCurveFill' }));
+    svg.appendChild(_svg('path', { d: `M${ax},${ay} C${h1x},${h1y} ${h2x},${h2y} ${bx},${by}`, class: 'tlCurveLine' }));
+    // 区間の名前(幅がある時だけ)
+    const pid = scCurvePresetId(cam.keys[i].curve);
+    if (g.w > 74) {
+      const t = _svg('text', { x: g.x0 + 5, y: 14, class: 'tlCurveLabel' });
+      t.textContent = pid ? CURVE_PRESETS[pid].label : 'カスタム';
+      svg.appendChild(t);
+    }
+    // ハンドル(○)と、端点からの線
+    svg.appendChild(_svg('line', { x1: ax, y1: ay, x2: h1x, y2: h1y, class: 'tlCurveArm' }));
+    svg.appendChild(_svg('line', { x1: bx, y1: by, x2: h2x, y2: h2y, class: 'tlCurveArm' }));
+    for (const which of [0, 1]) {
+      const [hx, hy] = which ? [h2x, h2y] : [h1x, h1y];
+      const h = _svg('circle', { cx: hx, cy: hy, r: 5.5, class: 'tlCurveHandle', 'data-seg': i, 'data-h': which });
+      const title = _svg('title', {});
+      title.textContent = which ? '次のポイントに着く時の速さ(ドラッグで調整)' : 'このポイントを出る時の速さ(ドラッグで調整)';
+      h.appendChild(title);
+      h.addEventListener('mousedown', (e) => _startCurveHandleDrag(e, svg, cam, i, which));
+      svg.appendChild(h);
+    }
+  }
+}
+
+// 再生ヘッドがある区間の番号(静的ショットは -1)
+function tlCurveSegmentAt(cam, tick) {
+  if (cam.keys.length < 2) return -1;
+  const s = scEditSeconds(cam, tick);
+  let i = 0;
+  while (i < cam.keys.length - 2 && s >= cam.keys[i + 1].time) i++;
+  return i;
+}
+
+function _startCurveHandleDrag(e, svg, cam, seg, which) {
+  if (e.button !== 0) return;
+  e.stopPropagation(); e.preventDefault();
+  beginEdit();
+  const H = parseFloat(svg.getAttribute('height'));
+  const onMove = (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const g = _curveSegGeom(cam, seg, H);
+    let nx = (ev.clientX - rect.left - g.x0) / g.w;
+    let ny = (rect.top + g.yb - ev.clientY) / g.H;
+    nx = Math.max(0, Math.min(1, nx));
+    ny = Math.max(0, Math.min(1, ny));
+    const c = scKeyCurve(cam.keys[seg]).slice();
+    if (which === 0) { c[0] = nx; c[1] = ny; } else { c[2] = nx; c[3] = ny; }
+    // Shiftを押している間は、反対側のハンドルも対称に動かす
+    if (ev.shiftKey) { if (which === 0) { c[2] = 1 - nx; c[3] = 1 - ny; } else { c[0] = 1 - nx; c[1] = 1 - ny; } }
+    cam.keys[seg].curve = c;
+    _drawCurveGraph(svg, cam);
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    const k = cam.keys[seg];
+    if (k && scCurvePresetId(k.curve) === 'linear') delete k.curve; // 等速に戻ったら持たない
+    commitEdit();
+    editorChanged();
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+// 区間のカーブを変える(パネルのボタンから)。seg<0 なら全区間
+function tlSetSegmentCurve(cam, seg, curve) {
+  const apply = (k) => { if (!curve || scCurvePresetId(curve) === 'linear') delete k.curve; else k.curve = curve.slice(); };
+  if (seg < 0) cam.keys.slice(0, -1).forEach(apply);
+  else if (cam.keys[seg]) apply(cam.keys[seg]);
 }
 
 function _addResizeHandles(el) {
@@ -526,6 +668,12 @@ let editPanelOpenFor = null; // { kind:'camera'|'text', id } | null
 let editPanelPointerDown = false; // パネルの中でマウスボタンを押している最中か
 
 function openEditPanel(item) {
+  const prevExpanded = tlExpandedCamId();
+  _openEditPanelInner(item);
+  if (tlExpandedCamId() !== prevExpanded) timelineRenderBlocks();
+}
+
+function _openEditPanelInner(item) {
   const panel = document.getElementById('editPanel');
   const title = document.getElementById('editPanelTitle');
   const body = document.getElementById('editPanelBody');
@@ -612,6 +760,7 @@ function renderCameraEditFields(title, body, cam) {
   mk(inPilot ? '🎥 カメラ視点を終わる (V)' : '🎥 カメラ視点に入って動かす (V)', () => togglePilot(), true);
   mk('◆ 今の視点を、再生ヘッドの時刻に記録 (K)', () => actionRecordKey());
   mk('👁 このカメラが見える所へ移動', () => lookAtCameraFromOutside(cam));
+  mk('⭐ このカメラの動きをカスタム素材に保存', () => { if (typeof saveCameraAsCustomAsset === 'function') saveCameraAsCustomAsset(cam); });
   body.appendChild(actions);
 
   // ---- 再生ヘッドの時刻の位置・角度 ----
@@ -673,7 +822,12 @@ function renderCameraEditFields(title, body, cam) {
   body.appendChild(fovRow);
   body.appendChild(_el('div', 'panelHint', '位置・角度を変えると、再生ヘッドの時刻にキー(◆)が無ければ自動で作られます。画角はカメラ全体で共通です。'));
 
-  camPanel = { camId: cam.id, fields, status };
+  // ---- 速さのカーブ(再生ヘッドがある区間) ----
+  body.appendChild(_el('div', 'panelSectionLabel', '動きの速さ(ポイントの間の進み方)'));
+  const curveSection = _el('div', 'curveSection');
+  body.appendChild(curveSection);
+
+  camPanel = { camId: cam.id, fields, status, curveSection, curveSeg: null };
   syncCameraPanelToPlayhead(true);
 
   // ---- ポイント(◆)の一覧 ----
@@ -825,6 +979,13 @@ function syncCameraPanelToPlayhead(force) {
     if (force || inp.value !== vals[k]) inp.value = vals[k];
     if (range && range !== active && range.value !== vals[k]) range.value = vals[k];
   }
+  const seg = tlCurveSegmentAt(cam, tick);
+  if (force || camPanel.curveSeg !== seg) {
+    camPanel.curveSeg = seg;
+    _renderCurveSection(camPanel.curveSection, cam, seg);
+    const svg = document.querySelector('.tlBlock.cam.expanded .tlCurveGraph svg');
+    if (svg) _drawCurveGraph(svg, cam); // 明るく見せる区間を追従させる
+  }
   const idx = scKeyIndexAtTick(cam, tick);
   const sec = ((tick - cam.startTick) / scTps()).toFixed(1);
   const outside = curTick < cam.startTick || curTick > cam.endTick;
@@ -836,11 +997,56 @@ function syncCameraPanelToPlayhead(force) {
   camPanel.status.className = 'poseStatus ' + cls;
 }
 
+// パネルの「動きの速さ」欄。再生ヘッドがある区間のカーブをひな形から選ぶ
+function _renderCurveSection(box, cam, seg) {
+  box.innerHTML = '';
+  if (seg < 0) {
+    box.appendChild(_el('div', 'panelHint', '固定カメラです。ポイントが2つ以上の動くカメラになると、ポイントの間の進み方(ゆっくり始まる・なめらかに止まる等)を選べます。'));
+    return;
+  }
+  box.appendChild(_el('div', 'curveSegLabel', `◆${seg + 1} → ◆${seg + 2} の区間(再生ヘッドの位置)`));
+  const cur = scCurvePresetId(cam.keys[seg].curve);
+  const group = _el('div', 'settingsRadioGroup');
+  for (const [id, p] of Object.entries(CURVE_PRESETS)) {
+    const pill = _el('button', 'settingsRadioPill curvePill' + (cur === id ? ' active' : ''));
+    pill.type = 'button';
+    pill.appendChild(_curveIcon(p.c));
+    pill.appendChild(document.createTextNode(p.label));
+    pill.addEventListener('click', () => {
+      if (cur === id) return;
+      pushUndo();
+      tlSetSegmentCurve(cam, seg, p.c);
+      editorChanged();
+    });
+    group.appendChild(pill);
+  }
+  box.appendChild(group);
+  if (!cur) box.appendChild(_el('div', 'panelHint', 'この区間は、グラフで調整したカスタムのカーブです。'));
+  const allBtn = _el('button', 'btn btn-ghost btn-sm', 'すべての区間をこのカーブにする');
+  allBtn.disabled = cam.keys.length < 3;
+  allBtn.addEventListener('click', () => {
+    pushUndo();
+    tlSetSegmentCurve(cam, -1, scKeyCurve(cam.keys[seg]));
+    showToast('すべての区間に同じカーブを使いました');
+    editorChanged();
+  });
+  box.appendChild(allBtn);
+  box.appendChild(_el('div', 'panelHint', 'タイムラインの広がったブロックの○をドラッグすると細かく調整できます(Shiftで左右対称)。グラフの傾きが急な所ほど速く、平らな所ほどゆっくり動きます。'));
+}
+
+function _curveIcon(c) {
+  const svg = _svg('svg', { width: 18, height: 14, viewBox: '0 0 18 14', class: 'curveIcon' });
+  svg.appendChild(_svg('path', { d: `M1,13 C${1 + c[0] * 16},${13 - c[1] * 12} ${1 + c[2] * 16},${13 - c[3] * 12} 17,1`, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8 }));
+  return svg;
+}
+
 function closeEditPanel() {
+  const wasExpanded = tlExpandedCamId();
   camPanel = null;
   document.getElementById('editPanel').classList.remove('open');
   document.getElementById('editor').classList.remove('panelOpen');
   editPanelOpenFor = null;
+  if (wasExpanded != null) timelineRenderBlocks();
 }
 
 // 編集パネルが開いている間は、選択を切り替えるとパネルの中身も追従させる

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bloxd Replay Editor</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Bricolage+Grotesque:opsz,wght@12..96,400..800&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=M+PLUS+Rounded+1c:wght@400;700;900&family=Noto+Serif+JP:wght@400;700;900&family=DotGothic16&display=swap');
 
   :root {
     --bg: #0B0D12;
@@ -127,6 +127,33 @@
   .assetSoon { border:1px dashed var(--border); border-radius:8px; padding:14px 12px; font-size:12px; color: var(--muted); line-height:1.6; }
   .assetSoon b { color: var(--ink); }
   .assetSoon p { margin:6px 0 0; }
+  .assetTabs { display:flex; gap:2px; padding:3px; border-radius:8px; background: var(--bg); border:1px solid var(--border); }
+  .assetTab { flex:1; padding:5px 4px; border:none; border-radius:6px; background:transparent; color: var(--muted);
+              font-family: var(--font-ui); font-size:12px; cursor:pointer; white-space:nowrap; }
+  .assetTab:hover { color: var(--ink); }
+  .assetTab.active { background: var(--surface-2); color: var(--ink); font-weight:700; box-shadow:0 1px 3px rgba(0,0,0,0.3); }
+  .assetCard { position:relative; }
+  .assetCard.open { grid-column: 1 / -1; cursor:default; border-color: var(--gold); transform:none; }
+  .assetCard.custom .assetThumb { box-shadow: inset 0 0 0 1px rgba(232,163,61,0.35); }
+  .assetCardBtns { position:absolute; top:9px; right:9px; display:flex; gap:3px; opacity:0; transition: opacity .12s ease; }
+  .assetCard:hover .assetCardBtns, .assetCard.open .assetCardBtns { opacity:1; }
+  .assetCardBtn { width:22px; height:22px; border-radius:6px; border:1px solid var(--border); background: var(--glass);
+                  color: var(--ink); font-size:11.5px; line-height:1; cursor:pointer; padding:0; }
+  .assetCardBtn:hover, .assetCardBtn.active { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); }
+  .assetSettings { margin-top:8px; padding-top:8px; border-top:1px solid var(--border); display:flex; flex-direction:column; gap:9px; }
+  .assetParam { display:flex; flex-direction:column; gap:4px; }
+  .assetParamHead { display:flex; justify-content:space-between; font-size:11.5px; }
+  .assetParamLabel { color: var(--muted); }
+  .assetParamValue { font-variant-numeric: tabular-nums; }
+  .assetParam input[type=range] { width:100%; accent-color: var(--gold); }
+  .assetSettingsActions { display:flex; flex-direction:column; gap:6px; margin-top:2px; }
+  .assetSettingsActions .btn { justify-content:center; }
+  .assetSaveRow { display:flex; gap:6px; }
+  .assetSaveRow .panelInput { font-size:12px; padding:5px 7px; }
+  .assetLinkBtn { background:none; border:none; color: var(--muted); font-size:11.5px; cursor:pointer; text-decoration:underline; padding:0; align-self:flex-start; }
+  .assetRename { font-size:12px; padding:2px 5px; width:100%; }
+  .assetIo { display:flex; gap:6px; }
+  .assetIo .btn { flex:1; justify-content:center; padding:6px 8px; }
   /* 素材をドラッグしている間は、落とせる場所を縁取りで示す */
   body.assetDragging #timelineScroll, body.assetDragging #freecamArea { outline:2px dashed rgba(232,163,61,0.6); outline-offset:-3px; }
 
@@ -242,6 +269,29 @@
   .tlKey:hover { background:#fff; box-shadow:0 0 0 2px rgba(255,255,255,0.35); }
   .tlKey.active { background: var(--gold); border-color:#fff; }
 
+  /* 編集パネルを開いているカメラブロック: 縦に広げて、速さのカーブのグラフを出す */
+  .tlRow.expanded { background: rgba(232,163,61,0.04); }
+  .tlBlock.cam.expanded { background: rgba(232,163,61,0.13); }
+  .tlBlock.cam.expanded.selected { background: rgba(232,163,61,0.2); }
+  .tlCurveGraph { position:absolute; left:0; right:0; }
+  .tlCurveGraph svg { display:block; overflow:visible; }
+  .tlCurveEmpty { position:absolute; left:10px; top:50%; transform:translateY(-50%); font-size:11px; color: var(--muted);
+                  white-space:nowrap; pointer-events:none; }
+  .tlCurveGrid { stroke: rgba(255,255,255,0.08); stroke-width:1; }
+  .tlCurveSeg { fill: transparent; }
+  .tlCurveSeg.hot { fill: rgba(255,255,255,0.05); }
+  .tlCurveKeyLine { stroke: rgba(255,255,255,0.18); stroke-dasharray:2 3; }
+  .tlCurveFill { fill: rgba(232,163,61,0.16); pointer-events:none; }
+  .tlCurveLine { fill:none; stroke: var(--gold); stroke-width:2; pointer-events:none; }
+  .tlCurveArm { stroke: rgba(236,234,227,0.55); stroke-width:1; pointer-events:none; }
+  .tlCurveHandle { fill: var(--surface); stroke: var(--ink); stroke-width:1.6; cursor:move; }
+  .tlCurveHandle:hover { fill: var(--gold); stroke:#fff; }
+  .tlCurveLabel { fill: var(--muted); font-size:10px; font-family: var(--font-ui); pointer-events:none; }
+  .curveSection { display:flex; flex-direction:column; gap:8px; }
+  .curveSegLabel { font-size:12px; color: var(--ink); }
+  .curvePill { display:inline-flex; align-items:center; gap:5px; }
+  .curveIcon { flex-shrink:0; }
+
   #timelinePlayhead { position:absolute; top:0; bottom:0; width:2px; margin-left:-1px; background: var(--emerald);
                       z-index:5; pointer-events:none; }
   #timelinePlayhead::before { content:''; position:absolute; top:0; left:-5px; width:12px; height:10px;
@@ -298,6 +348,7 @@
   .settingsRadioPill { padding:6px 12px; border-radius:8px; border:1px solid var(--border); background:transparent;
                         color: var(--muted); font-family: var(--font-ui); font-size:12.5px; cursor:pointer; }
   .settingsRadioPill:hover { border-color: var(--muted); color: var(--ink); }
+  .settingsRadioPill.small { padding:4px 9px; font-size:12px; }
   .settingsRadioPill.active { background: var(--gold); color: var(--gold-ink); border-color: var(--gold); font-weight:700; }
 
   /* ============================================================
@@ -502,13 +553,14 @@
       <div>
         <h3>カメラ</h3>
         <table>
-          <tr><td>素材一覧</td><td>後ろから・真上から・追いかける等のカメラを追加</td></tr>
+          <tr><td>素材一覧</td><td>後ろから・周りを回る等のカメラを追加(⚙で秒数・距離など)</td></tr>
           <tr><td><kbd>F</kbd></td><td>今の構図で、再生ヘッドの位置にカメラを置く</td></tr>
           <tr><td><kbd>K</kbd></td><td>今の構図を、再生ヘッドの時刻のキーとして記録</td></tr>
           <tr><td><kbd>V</kbd></td><td>選択中のカメラの目線に入る/戻る</td></tr>
-          <tr><td>カメラをダブルクリック</td><td>位置・角度・画角・表示位置を数値で直す(キーは自動で作られる)</td></tr>
-          <tr><td>箱をクリック</td><td>そのカメラ・ポイントを選ぶ</td></tr>
-          <tr><td>矢印 / リングをドラッグ</td><td>選んだポイントの位置 / 向きを直す</td></tr>
+          <tr><td>カメラをダブルクリック</td><td>位置・角度・画角・表示位置・動きの速さを直す(キーは自動で作られる)</td></tr>
+          <tr><td>箱 / ◆をクリック</td><td>そのカメラを選ぶ / そのポイントの時刻へ</td></tr>
+          <tr><td>矢印 / リングをドラッグ</td><td>再生ヘッドの時刻の位置 / 向きを直す(ポイントが無ければ自動で作る)</td></tr>
+          <tr><td>Shift+矢印 / リング</td><td>カメラ全体(全ポイント)をまとめて動かす / 回す</td></tr>
         </table>
       </div>
       <div>
@@ -521,6 +573,7 @@
           <tr><td>Ctrl/Cmd+ホイール</td><td>拡大・縮小(トラックパッドはピンチ)</td></tr>
           <tr><td>ブロックを上下にドラッグ</td><td>カメラの重なり順(上ほど手前)</td></tr>
           <tr><td>◆ をドラッグ</td><td>そのポイントの時刻を変える</td></tr>
+          <tr><td>カーブの○をドラッグ</td><td>ポイントの間の速さ(ゆっくり始まる等)。Shiftで対称</td></tr>
         </table>
       </div>
       <div>

@@ -484,8 +484,8 @@ function addCameraAt(tick, keys, opts) {
   opts = opts || {};
   if (pilot) exitPilot(false); // カメラ視点の構図のまま、新しいカメラにする
   pushUndo();
-  const cam = scCreateCamera(keys[0], fcFovDeg, tick, opts.seconds);
-  if (keys.length > 1) cam.keys = keys.map(k => ({ time: k.time, pos: k.pos.slice(), yaw: k.yaw, pitch: k.pitch }));
+  const cam = scCreateCamera(keys[0], opts.fov || fcFovDeg, tick, opts.seconds);
+  if (keys.length > 1) cam.keys = keys.map(_cloneKey);
   if (opts.name) cam.name = opts.name + ' ' + cam.id;
   selectCamera(cam.id, 0, false);
   showToast(opts.toast || `📷 ${scCamName(cam)}を置きました`);
@@ -593,11 +593,19 @@ function syncFovSliderUI() {
 // 移動・回転ギズモのドラッグ(キー1個ぶんの位置・向きを直接いじる)
 // ============================================================
 
-function beginGizmoDrag(part, point, mx, my) {
+// point: ギズモの位置(再生ヘッドの時刻の姿勢のコピー)。
+// whole=false(ふつう): 再生ヘッドの時刻のポイントを動かす。その時刻にポイントが
+//   無ければ、実際に動かし始めた時に自動で作る(右パネルの数値編集と同じ考え方)。
+// whole=true(Shift+ドラッグ): カメラ全体(全ポイント)をまとめて動かす・回す。
+function beginGizmoDrag(part, point, mx, my, whole) {
+  const cam = scGetSelected();
+  if (!cam) return;
   const ray = scRayFromScreen(mx, my, fcCanvas.width, fcCanvas.height, fcPos, fcYaw, fcPitch, fcFovDeg);
+  point = _clonePose(point);
   dragState = {
-    part, point,
+    part, point, camId: cam.id, whole: !!whole, pending: true, startMouse: [mx, my],
     startPos: point.pos.slice(), startYaw: point.yaw, startPitch: point.pitch,
+    startKeys: cam.keys.map(k => _clonePose(k)),
   };
   if (part.kind === 'axis') {
     dragState.axisDir = _axisVec(part.axis);
@@ -621,8 +629,48 @@ function beginGizmoDrag(part, point, mx, my) {
   }
 }
 
+// 実際に動き始めた時に、動かす対象(キー)を決める
+function _gizmoDragTarget() {
+  const d = dragState;
+  const cam = scGetCamera(d.camId);
+  if (!cam) return null;
+  if (d.pending) {
+    d.pending = false;
+    if (!d.whole) {
+      const r = scEditPoseAtTick(cam, curTick, {});
+      d.keyIndex = r.index;
+      selectedKeyIndex = r.index; selectedKeyExplicit = true;
+      if (r.created) {
+        if (typeof timelineRenderBlocks === 'function') timelineRenderBlocks();
+        showToast(`◆ ${r.seconds.toFixed(1)}秒にポイントを自動で作りました(Shift+ドラッグでカメラ全体を動かせます)`);
+      }
+    }
+  }
+  return cam;
+}
+
+// 全体移動: 動かしたぶんを全ポイントに足す。左右の回転は、ギズモの位置を中心に軌道ごと回す
+function _applyWholeDelta(cam, point) {
+  const d = dragState;
+  const dp = [0, 1, 2].map(i => point.pos[i] - d.startPos[i]);
+  const dyaw = point.yaw - d.startYaw, dpitch = point.pitch - d.startPitch;
+  const c = Math.cos(dyaw), sn = Math.sin(dyaw);
+  const limit = Math.PI / 2 - 0.05;
+  cam.keys.forEach((k, i) => {
+    const o = d.startKeys[i];
+    let rx = o.pos[0] - d.startPos[0], rz = o.pos[2] - d.startPos[2];
+    if (dyaw) { const nx = rx * c + rz * sn, nz = -rx * sn + rz * c; rx = nx; rz = nz; }
+    k.pos = [d.startPos[0] + rx + dp[0], o.pos[1] + dp[1], d.startPos[2] + rz + dp[2]];
+    k.yaw = o.yaw + dyaw;
+    k.pitch = Math.max(-limit, Math.min(limit, o.pitch + dpitch));
+  });
+}
+
 function applyGizmoDrag(mx, my) {
   if (!dragState) return;
+  if (dragState.pending && Math.hypot(mx - dragState.startMouse[0], my - dragState.startMouse[1]) < 2) return;
+  const cam = _gizmoDragTarget();
+  if (!cam) { dragState = null; return; }
   const point = dragState.point;
   const ray = scRayFromScreen(mx, my, fcCanvas.width, fcCanvas.height, fcPos, fcYaw, fcPitch, fcFovDeg);
   const part = dragState.part;
@@ -657,6 +705,9 @@ function applyGizmoDrag(mx, my) {
       point.pitch = Math.max(-limit, Math.min(limit, dragState.startPitch + delta));
     }
   }
+  if (dragState.whole) { _applyWholeDelta(cam, point); return; }
+  const k = cam.keys[dragState.keyIndex];
+  if (k) { k.pos = point.pos.slice(); k.yaw = point.yaw; k.pitch = point.pitch; }
 }
 
 
@@ -706,16 +757,19 @@ function onViewportMouseDown(e) {
       const active = scGetActivePoint();
       if (active) {
         const part = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
-        if (part) { beginEdit(); beginGizmoDrag(part, active, mx, my); return; }
+        if (part) { beginEdit(); beginGizmoDrag(part, active, mx, my, e.shiftKey); return; }
       }
       const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
       if (picked) {
         const cam = scGetCamera(picked.camId);
-        if (cam && !scCamIsStatic(cam)) {
+        if (cam && picked.kind === 'key') {
+          // ◆: そのポイントの時刻へ再生ヘッドを動かして選ぶ(ギズモはそのポイントに出る)
           if (typeof stopPlayback === 'function') stopPlayback();
           seekTo(scKeyAbsTick(cam, cam.keys[picked.keyIndex]));
+          selectCamera(picked.camId, picked.keyIndex, true);
+        } else {
+          selectCamera(picked.camId, null, false);
         }
-        selectCamera(picked.camId, picked.keyIndex, true);
         return;
       }
     } catch (err) {
@@ -861,7 +915,8 @@ function currentContextHint() {
     const p = planRecordKey(cam);
     const k = p.mode === 'update' ? `K:ポイント${p.index + 1}を今の構図に更新`
       : (p.convert ? `K:${p.s.toFixed(1)}秒にキー(動くショットに)` : `K:${p.s.toFixed(1)}秒にキー`);
-    return `矢印ドラッグ=移動・リング=向き / ${k} / V:カメラ視点 / ダブルクリック(タイムライン)で数値編集 / Delete:削除`;
+    const at = scKeyIndexAtTick(cam, curTick) >= 0 ? 'このポイント' : `${scEditSeconds(cam, curTick).toFixed(1)}秒(自動でポイント追加)`;
+    return `矢印・リングのドラッグで${at}を動かす / Shift+ドラッグ: カメラ全体 / ${k} / V:カメラ視点 / Delete:削除`;
   }
   return 'ドラッグ: 見回す / WASD: 移動・Q/E: 上下 / ホイール: 前後 / 左の素材一覧、または F で今の視点にカメラを置く';
 }
