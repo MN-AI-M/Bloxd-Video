@@ -170,6 +170,8 @@
   .scriptMsg.ok { color: var(--emerald); }
   .scriptMsg.warn { color:#F0C070; border:1px dashed #6a5420; }
   .scriptMsg.error { color:#F29A9A; border:1px solid #5a2a2a; }
+  .genActions { display:flex; gap:6px; flex-wrap:wrap; }
+  .genParams { padding:10px; border-radius:8px; background: rgba(62,207,142,0.05); border:1px solid rgba(62,207,142,0.18); }
   .scriptLog { margin:0; max-height:180px; overflow:auto; font-size:11.5px; line-height:1.5; padding:8px 10px;
                border-radius:7px; background: var(--bg); border:1px solid var(--border); color: var(--muted); white-space:pre-wrap; }
 
@@ -613,7 +615,7 @@
         <h3>カメラ</h3>
         <table>
           <tr><td>素材一覧</td><td>後ろから・周りを回る等のカメラを追加(⚙で秒数・距離など)</td></tr>
-          <tr><td>🧩 スクリプト</td><td>障害物よけ・目線合わせ・自動カット割りなどを自動で。自分で書くこともできる</td></tr>
+          <tr><td>カメラの素材</td><td>どれもスクリプト。置いた後も、ダブルクリックで設定を変えると作り直せる。カスタムで自分で書ける(.js)</td></tr>
           <tr><td><kbd>F</kbd></td><td>今の構図で、再生ヘッドの位置にカメラを置く</td></tr>
           <tr><td><kbd>K</kbd></td><td>今の構図を、再生ヘッドの時刻のキーとして記録</td></tr>
           <tr><td><kbd>V</kbd></td><td>選択中のカメラの目線に入る/戻る</td></tr>

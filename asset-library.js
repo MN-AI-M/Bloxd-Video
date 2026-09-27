@@ -57,32 +57,6 @@ function _needPlayer(tick) {
   return p;
 }
 
-// プレイヤーを基準にした固定カメラ。offsetFn(head, yaw) → 目の位置
-function _playerShot(tick, label, seconds, offsetFn) {
-  const p = _needPlayer(tick);
-  if (!p) return null;
-  const pose = _lookAtPose(offsetFn(p.head, p.yaw), p.head);
-  return addCameraAt(tick, [{ time: 0, ...pose }], { seconds, name: label, toast: `📷 「${label}」のカメラを置きました(${seconds}秒)` });
-}
-
-// プレイヤーの動きに合わせて、一定の間隔でキーを打った動くカメラ。
-// eyeFn(p=その時のプレイヤー, p0=最初のプレイヤー, u=0→1の進み具合) → 目の位置
-// look: 'player'(毎回プレイヤーを見る)
-function _playerMovingShot(tick, label, seconds, step, smooth, eyeFn) {
-  const p0 = _needPlayer(tick);
-  if (!p0) return null;
-  const tps = scTps();
-  const keys = [];
-  const n = Math.max(1, Math.round(seconds / step));
-  for (let i = 0; i <= n; i++) {
-    const t = seconds * i / n;
-    const p = _playerAt(tick + t * tps);
-    const u = smooth ? _easeInOut(i / n) : i / n;
-    keys.push({ time: t, ..._lookAtPose(eyeFn(p, p0, u), p.head) });
-  }
-  return addCameraAt(tick, keys, { seconds, name: label, toast: `🎬 「${label}」のカメラを置きました(${seconds}秒)` });
-}
-
 // ------------------------------------------------------------
 // 設定項目の書き方(params):
 //   { key, label, min, max, step, unit, def }            … スライダー
@@ -90,52 +64,10 @@ function _playerMovingShot(tick, label, seconds, step, smooth, eyeFn) {
 // ------------------------------------------------------------
 
 const P_SECONDS = (def) => ({ key: 'seconds', label: '長さ', min: 0.5, max: 20, step: 0.5, unit: '秒', def });
-const P_DIST = (def, label) => ({ key: 'dist', label: label || '距離', min: 1, max: 30, step: 0.5, unit: 'ブロック', def });
-const P_HEIGHT = (def) => ({ key: 'height', label: '高さ', min: -4, max: 30, step: 0.5, unit: 'ブロック', def });
-const P_SMOOTH = { key: 'smooth', label: '動き方', choices: [['なめらか', 1], ['等速', 0]], def: 1 };
 
 const TEXT_ASSET_SECONDS = P_SECONDS(2);
 
 const OFFICIAL_ASSETS = {
-  camera: [
-    { id: 'view', icon: '📷', label: '今の視点', desc: '今見えている構図をそのまま (F)',
-      params: [P_SECONDS(3)],
-      add: (tick, o) => addCameraAt(tick, [{ time: 0, ...currentViewPose() }], { seconds: o.seconds }) },
-    { id: 'behind', icon: '🧍', label: '後ろから', desc: 'プレイヤーの背中越し',
-      params: [P_SECONDS(3), P_DIST(6), P_HEIGHT(2)],
-      add: (tick, o) => _playerShot(tick, '後ろから', o.seconds, (h, y) => _add3(_add3(h, _fwd(y), -o.dist), [0, 1, 0], o.height)) },
-    { id: 'front', icon: '🙂', label: '正面から', desc: 'プレイヤーの顔を正面から',
-      params: [P_SECONDS(3), P_DIST(5), P_HEIGHT(0.5)],
-      add: (tick, o) => _playerShot(tick, '正面から', o.seconds, (h, y) => _add3(_add3(h, _fwd(y), o.dist), [0, 1, 0], o.height)) },
-    { id: 'side', icon: '↔', label: '横から', desc: 'プレイヤーを真横から',
-      params: [P_SECONDS(3), P_DIST(6), P_HEIGHT(1), { key: 'side', label: '向き', choices: [['右から', 1], ['左から', -1]], def: 1 }],
-      add: (tick, o) => _playerShot(tick, '横から', o.seconds, (h, y) => _add3(_add3(h, _right(y), o.dist * o.side), [0, 1, 0], o.height)) },
-    { id: 'top', icon: '⬇', label: '真上から', desc: '上から見下ろす(建築向き)',
-      params: [P_SECONDS(3), P_HEIGHT(18)],
-      add: (tick, o) => _playerShot(tick, '真上から', o.seconds, (h, y) => _add3(_add3(h, [0, 1, 0], Math.max(2, o.height)), _fwd(y), -0.5)) },
-    { id: 'follow', icon: '🏃', label: '追いかける', desc: '後ろからついて行く(動く)',
-      params: [P_SECONDS(4), P_DIST(6), P_HEIGHT(2.5), { key: 'step', label: 'ポイント間隔', min: 0.25, max: 2, step: 0.25, unit: '秒', def: 0.5 }],
-      add: (tick, o) => _playerMovingShot(tick, '追いかけ', o.seconds, o.step, false, (p, p0) =>
-        _add3(_add3(p.head, _fwd(p0.yaw), -o.dist), [0, 1, 0], o.height)) },
-    { id: 'orbit', icon: '🔄', label: '周りを回る', desc: 'プレイヤーの周りを回る(動く)',
-      params: [P_SECONDS(6), P_DIST(7, '半径'), P_HEIGHT(2.5),
-        { key: 'angle', label: '回る角度', min: 45, max: 720, step: 15, unit: '°', def: 360 },
-        { key: 'dir', label: '向き', choices: [['左回り', 1], ['右回り', -1]], def: 1 }, P_SMOOTH],
-      add: (tick, o) => _playerMovingShot(tick, '周回', o.seconds, 0.5, !!o.smooth, (p, p0, u) => {
-        const a = p0.yaw + Math.PI + o.dir * u * o.angle * Math.PI / 180;
-        return [p.head[0] + Math.sin(a) * o.dist, p.head[1] + o.height, p.head[2] + Math.cos(a) * o.dist];
-      }) },
-    { id: 'dolly', icon: '🔍', label: 'ゆっくり寄る', desc: '遠くからプレイヤーに近づく(動く)',
-      params: [P_SECONDS(4), { key: 'from', label: '始めの距離', min: 2, max: 40, step: 0.5, unit: 'ブロック', def: 14 },
-        { key: 'to', label: '終わりの距離', min: 1, max: 40, step: 0.5, unit: 'ブロック', def: 4 }, P_HEIGHT(2), P_SMOOTH],
-      add: (tick, o) => _playerMovingShot(tick, '寄り', o.seconds, 0.5, !!o.smooth, (p, p0, u) =>
-        _add3(_add3(p.head, _fwd(p0.yaw), -(o.from + (o.to - o.from) * u)), [0, 1, 0], o.height)) },
-    { id: 'rise', icon: '🛗', label: '上へ昇る', desc: 'プレイヤーを見ながら上昇(動く)',
-      params: [P_SECONDS(5), P_DIST(8), { key: 'h0', label: '始めの高さ', min: -2, max: 30, step: 0.5, unit: 'ブロック', def: 0 },
-        { key: 'h1', label: '終わりの高さ', min: 0, max: 60, step: 0.5, unit: 'ブロック', def: 16 }, P_SMOOTH],
-      add: (tick, o) => _playerMovingShot(tick, '上昇', o.seconds, 0.5, !!o.smooth, (p, p0, u) =>
-        _add3(_add3(p.head, _fwd(p0.yaw), -o.dist), [0, 1, 0], o.h0 + (o.h1 - o.h0) * u)) },
-  ],
   text: [
     { id: 'title', icon: 'Aa', label: 'タイトル', desc: '中央に大きく・ポップ',
       sample: { fontSize: 22, weight: 900 }, params: [TEXT_ASSET_SECONDS],
@@ -171,7 +103,6 @@ for (const item of OFFICIAL_ASSETS.text) {
 const ASSET_CATEGORIES = [
   { id: 'camera', icon: '🎥', label: 'カメラ' },
   { id: 'text', icon: '📝', label: 'テキスト' },
-  { id: 'script', icon: '🧩', label: 'スクリプト' },
   { id: 'music', icon: '🎵', label: '音楽', soon: '音声ファイルを読み込んで、BGMや効果音として並べられるようにする予定です。' },
   { id: 'pose', icon: '🕺', label: 'ポーズ', soon: 'プレイヤーの姿勢を決めて、タイムラインに並べられるようにする予定です。' },
   { id: 'effect', icon: '✨', label: 'エフェクト', soon: 'スロー・早送りや画面の効果などを追加する予定です。' },
@@ -261,11 +192,9 @@ function addAssetAt(key, tick) {
   if (typeof stopPlayback === 'function') stopPlayback();
   tick = Math.max(0, Math.round(tick));
   const [a, b] = String(key).split(':');
-  // スクリプト: その時刻に再生ヘッドを動かして、右パネル(設定と ▶実行)を開く
-  const isScript = a === 'script' || (a === 'custom' && customAssets.some(x => x.id === b && x.type === 'script'));
-  if (isScript) {
-    seekTo(tick);
-    if (typeof openScriptPanel === 'function') openScriptPanel(key);
+  // カメラの素材は、全部スクリプト(script-library.js)
+  if (typeof isCameraScriptKey === 'function' && isCameraScriptKey(key)) {
+    addCameraScriptAt(key, tick);
     return;
   }
   if (a === 'custom') {
@@ -278,27 +207,7 @@ function addAssetAt(key, tick) {
 }
 
 function _addCustomAsset(c, tick) {
-  if (c.type === 'preset') {
-    const item = _officialItem(c.cat, c.base);
-    if (!item) { showToast('元になった素材が見つかりません'); return; }
-    item.add(tick, { ..._defaultParams(item), ...c.params });
-    return;
-  }
-  if (c.type === 'textStyle') {
-    addTextAt(tick, { ...c.style }, c.name);
-    return;
-  }
-  if (c.type === 'camMove') {
-    let keys;
-    if (c.relative) {
-      const p = _needPlayer(tick);
-      if (!p) return;
-      keys = c.keys.map(k => _fromPlayerFrame(k, p));
-    } else {
-      keys = c.keys.map(k => ({ ...k, pos: k.pos.slice() }));
-    }
-    addCameraAt(tick, keys, { seconds: c.seconds, fov: c.fov, name: c.name, toast: `🎬 「${c.name}」のカメラを置きました(${c.seconds}秒)` });
-  }
+  if (c.type === 'textStyle') addTextAt(tick, { ...c.style }, c.name);
 }
 
 // プレイヤーから見た位置・向き ⇄ 世界の位置・向き(左右の向きだけ回す)
@@ -334,25 +243,14 @@ function _addCustom(entry, toastText) {
   showToast(toastText || `⭐ 「${entry.name}」をカスタム素材に保存しました`);
 }
 
-// ⚙ の設定で保存
+// ⚙ の設定で保存(テキスト)
 function saveParamsAsCustom(catId, itemId, name) {
   const item = _officialItem(catId, itemId);
-  if (!item) return;
+  if (!item || catId !== 'text') return;
   const params = assetParams(catId, itemId);
-  _addCustom({ cat: catId, type: 'preset', base: itemId, name: name || item.label, icon: item.icon, params,
+  _addCustom({ cat: catId, type: 'textStyle', name: name || item.label, icon: item.icon,
+               style: { ...item.style, seconds: params.seconds },
                desc: `${item.label}をもとに · ${_paramSummary(item, params)}`, sample: item.sample || null });
-}
-
-// 右パネルから: 選んでいるカメラの動きを、プレイヤー基準で保存
-function saveCameraAsCustomAsset(cam) {
-  if (!cam) return;
-  const seconds = +((cam.endTick - cam.startTick) / scTps()).toFixed(2);
-  const p = _playerAt(cam.startTick);
-  const keys = cam.keys.map(k => p ? _toPlayerFrame(k, p) : { ..._cloneKey(k) });
-  const name = scCamName(cam).replace(/\s+\d+$/, '') || 'カメラ';
-  _addCustom({ cat: 'camera', type: 'camMove', name, icon: scCamIsStatic(cam) ? '📷' : '🎬',
-               relative: !!p, keys, seconds, fov: cam.fov,
-               desc: `${seconds}秒 · ${scCamIsStatic(cam) ? '固定' : `動く(${cam.keys.length}点)`}${p ? ' · プレイヤー基準' : ''}` });
 }
 
 // 右パネルから: 選んでいるテキストの見た目を保存
@@ -381,10 +279,10 @@ function renameCustomAsset(id, name) {
 
 // 書き出し(.json)・読み込み
 function exportCustomAssets() {
-  const data = JSON.stringify({ format: 'bloxd-editor-assets', version: 1, assets: customAssets }, null, 2);
+  const data = JSON.stringify({ format: 'bloxd-editor-assets', version: 1, assets: customAssets.filter(c => c.cat === 'text') }, null, 2);
   const a = document.createElement('a');
   a.href = URL.createObjectURL(new Blob([data], { type: 'application/json' }));
-  a.download = 'bloxd-custom-assets.json';
+  a.download = 'bloxd-text-styles.json';
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
@@ -412,6 +310,7 @@ function importCustomAssetsFromText(text) {
 // ------------------------------------------------------------
 
 function assetLibraryInit() {
+  if (typeof cameraScriptsInit === 'function') cameraScriptsInit();
   renderAssetRail();
   renderAssetList();
   setupAssetDropTargets();
@@ -479,7 +378,7 @@ function renderAssetList() {
     return;
   }
 
-  if (cat.id === 'script' && typeof renderScriptAssets === 'function') renderScriptAssets(list, activeAssetSource);
+  if (cat.id === 'camera' && typeof renderCameraAssets === 'function') renderCameraAssets(list, activeAssetSource);
   else if (activeAssetSource === 'official') _renderOfficial(list, cat);
   else if (activeAssetSource === 'custom') _renderCustom(list, cat);
   else _renderPublic(list, cat);

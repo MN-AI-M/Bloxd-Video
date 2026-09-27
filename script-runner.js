@@ -200,11 +200,101 @@ function __cameraScriptWorkerMain() {
           },
         };
       }
+      // ---- 仕上げの道具(壁よけ・手ぶれ)。キーの配列を受け取って、新しいキーの配列を返す ----
+      function resolveKeys(keys) {
+        if (!Array.isArray(keys) || !keys.length) fail('キーの配列が空です');
+        return keys.map(function (k) {
+          const o = { time: +k.time || 0, pos: k.pos.slice(), yaw: k.yaw, pitch: k.pitch };
+          const c = typeof k.curve === 'string' ? CURVES[k.curve] : k.curve;
+          if (c) o.curve = c;
+          if (k.lookAt) { const a = lookAt(k.pos, k.lookAt); o.yaw = a.yaw; o.pitch = a.pitch; }
+          if (o.yaw == null) o.yaw = 0;
+          if (o.pitch == null) o.pitch = 0;
+          return o;
+        }).sort(function (a, b) { return a.time - b.time; });
+      }
+      function sampleTimes(len, step) {
+        const n = Math.max(1, Math.round(len / step));
+        const out = [];
+        for (let i = 0; i <= n; i++) out.push(len * i / n);
+        return out;
+      }
+      const startTick = S.start != null ? S.start : S.playhead;
+      const fx = {
+        resolve: resolveKeys,
+        // 見る相手(ふつうはプレイヤーの頭)との間にブロックがある所だけ、カメラを相手の側へ寄せる
+        avoidWalls(keys, o) {
+          o = o || {};
+          const ks = resolveKeys(keys);
+          const start = o.start != null ? o.start : startTick;
+          const len = o.seconds != null ? o.seconds : ks[ks.length - 1].time;
+          const pl = o.target ? null : api.player(o.playerId);
+          const target = o.target || function (t) { return pl.at(start + t * S.tps).head; };
+          const margin = o.margin != null ? o.margin : 0.6, minDist = o.minDist != null ? o.minDist : 1.5;
+          const aim = o.aim !== false;
+          let moved = 0;
+          const out = sampleTimes(len, o.step || 0.25).map(function (t) {
+            const tick = start + t * S.tps;
+            const pose = evalKeys(ks, t);
+            const tg = target(t);
+            // 相手(プレイヤーの頭)がブロックに埋まっている時は判断できないので、そのまま
+            if (isSolidBlock(Math.floor(tg[0]), Math.floor(tg[1]), Math.floor(tg[2]), tick)) return { time: t, pos: pose.pos, yaw: pose.yaw, pitch: pose.pitch };
+            const hit = raycast(tg, pose.pos, { tick: tick, ignoreStart: true });
+            if (!hit) return { time: t, pos: pose.pos, yaw: pose.yaw, pitch: pose.pitch };
+            moved++;
+            // 1) 壁の手前まで寄せる(近づきすぎない時)  2) だめなら上へ逃げる(壁越しに見下ろす)
+            // 3) それもだめなら、できるだけ寄せる
+            let pos = null;
+            const pull = hit.dist - margin;
+            if (pull >= minDist) pos = vec.add(tg, vec.scale(vec.norm(vec.sub(pose.pos, tg)), pull));
+            if (!pos) {
+              for (const dh of [1.5, 3, 4.5, 6, 8, 11]) {
+                const up = [pose.pos[0], pose.pos[1] + dh, pose.pos[2]];
+                if (!raycast(tg, up, { tick: tick, ignoreStart: true })) { pos = up; break; }
+              }
+            }
+            if (!pos) pos = vec.add(tg, vec.scale(vec.norm(vec.sub(pose.pos, tg)), Math.max(0.4, pull)));
+            const a = aim ? lookAt(pos, tg) : pose;
+            return { time: t, pos: pos, yaw: a.yaw, pitch: a.pitch };
+          });
+          if (!moved) return ks;
+          // 動かさなかった所が続く時は、途中のキーを省く(固定カメラが無駄にキーだらけにならないように)
+          const same = (a, b) => a && b && vec.dist(a.pos, b.pos) < 1e-6 && Math.abs(a.yaw - b.yaw) < 1e-6 && Math.abs(a.pitch - b.pitch) < 1e-6;
+          return out.filter(function (k, i) { return i === 0 || i === out.length - 1 || !(same(k, out[i - 1]) && same(k, out[i + 1])); });
+        },
+        // 手で持って撮ったような揺れ
+        handheld(keys, o) {
+          o = o || {};
+          const ks = resolveKeys(keys);
+          const amount = o.amount != null ? o.amount : 0.12, turn = o.turn != null ? o.turn : 0.8;
+          const speed = o.speed || 0.8, seed = o.seed || 1;
+          if (!amount && !turn) return ks;
+          const len = o.seconds != null ? o.seconds : ks[ks.length - 1].time;
+          return sampleTimes(len, o.step || 0.1).map(function (t) {
+            const pose = evalKeys(ks, t), u = t * speed;
+            return {
+              time: t,
+              pos: [pose.pos[0] + noise(u, seed) * amount, pose.pos[1] + noise(u, seed + 11) * amount * 0.6, pose.pos[2] + noise(u, seed + 23) * amount],
+              yaw: pose.yaw + noise(u * 1.3, seed + 37) * turn,
+              pitch: pose.pitch + noise(u * 1.1, seed + 51) * turn * 0.7,
+            };
+          });
+        },
+        // よく使う仕上げをまとめて: { seconds, avoid: true/false, shake: 0〜1 }
+        finish(keys, o) {
+          o = o || {};
+          let ks = resolveKeys(keys);
+          if (o.avoid) ks = fx.avoidWalls(ks, o);
+          if (o.shake > 0) ks = fx.handheld(ks, { seconds: o.seconds, amount: o.shake * 0.3, turn: o.shake * 2.5, seed: o.seed || 1 });
+          return ks;
+        },
+      };
+
       const cams = (S.cameras || []).map(c => Object.assign({}, c, { poseAt(tick) { return evalKeys(c.keys, (tick - c.start) / S.tps); } }));
 
       const api = {
         version: 1,
-        tps: S.tps, totalTicks: S.totalTicks, playhead: S.playhead,
+        tps: S.tps, totalTicks: S.totalTicks, playhead: S.playhead, start: startTick,
         toTick: (sec) => sec * S.tps, toSec: (tick) => tick / S.tps,
         view: S.view,
         info(o) { info = { name: o && o.name ? String(o.name) : null, description: o && o.description ? String(o.description) : null }; },
@@ -242,6 +332,7 @@ function __cameraScriptWorkerMain() {
         fail,
         curves: CURVES,
         evalKeys,
+        fx,
       };
       const fn = new AsyncFunction('api', '"use strict";\n' + code);
       await fn(api);
@@ -286,8 +377,12 @@ const WORKER_SRC = `(${__cameraScriptWorkerMain.toString()})();`;
 let _scriptRunSeq = 0;
 
 // 戻り値: Promise<{ type:'done'|'fail'|'error'|'timeout', ops, logs, defs, info, message, line }>
-function runScriptSandboxed(code, mode, params, onProgress) {
-  const snapshot = buildScriptSnapshot(mode);
+// extra(作り直しの時に、最初に置いた時と同じ条件で動かすため):
+//   start … api.start(カメラを置く時刻。省略すると再生ヘッド)
+//   view … api.view(置いた時の編集視点) / focusId … api.player() の人
+//   excludeGroup … このグループのカメラは api.cameras() に入れない(作り直すと消える物なので)
+function runScriptSandboxed(code, mode, params, onProgress, extra) {
+  const snapshot = buildScriptSnapshot(mode, extra);
   const timeoutMs = mode === 'describe' ? SCRIPT_DESCRIBE_TIMEOUT_MS : SCRIPT_TIMEOUT_MS;
   const seq = ++_scriptRunSeq;
   return new Promise((resolve) => {
@@ -401,19 +496,28 @@ function _scriptCameras() {
   }));
 }
 
-function buildScriptSnapshot(mode) {
+function currentScriptView() {
+  return { pos: [fcPos[0] + worldOriginX, fcPos[1] + worldOriginY, fcPos[2] + worldOriginZ], yaw: _r2d(fcYaw), pitch: _r2d(fcPitch), fov: fcFovDeg };
+}
+function currentFocusId() {
   const focus = document.getElementById('entitySelect');
+  return focus ? focus.value : null;
+}
+
+function buildScriptSnapshot(mode, extra) {
+  extra = extra || {};
   const base = {
     tps: scTps(), totalTicks: scMaxTick() + 1, playhead: curTick,
-    focusId: focus ? focus.value : null,
+    start: extra.start != null ? extra.start : curTick,
+    focusId: extra.focusId != null ? extra.focusId : currentFocusId(),
     selectedCameraId: (typeof selectedCameraId !== 'undefined') ? selectedCameraId : null,
-    view: { pos: [fcPos[0] + worldOriginX, fcPos[1] + worldOriginY, fcPos[2] + worldOriginZ], yaw: _r2d(fcYaw), pitch: _r2d(fcPitch), fov: fcFovDeg },
+    view: extra.view || currentScriptView(),
   };
   if (mode === 'describe') return { ...base, entities: [], cameras: [], texts: [], blocks: new Int32Array(0) };
   return {
     ...base,
     entities: _scriptEntities(),
-    cameras: _scriptCameras(),
+    cameras: _scriptCameras().filter(c => extra.excludeGroup == null || !(scGetCamera(c.id) && scGetCamera(c.id).gen && scGetCamera(c.id).gen.group === extra.excludeGroup)),
     texts: (typeof textBlocks !== 'undefined' ? textBlocks : []).map(t => ({ id: t.id, content: t.content, start: t.startTick, end: t.endTick })),
     blocks: _scriptWorldBlocks(),
   };
@@ -485,11 +589,35 @@ function _fitCamToKeys(cam) {
 }
 
 // 戻り値: { summary, error }
-function applyScriptOps(ops) {
-  if (!ops.length) return { summary: '変更はありませんでした' };
+// opts:
+//   history: false … 取り消しの履歴に積まない(呼ぶ側が beginEdit/commitEdit で管理する時)
+//   gen: { src, name, code, params, anchor, group } … 作ったカメラに「どのスクリプトの、どの設定で
+//        作ったか」を覚えさせる(右パネルで設定を変えると作り直せるようにするため)
+//   replaceGroup: このグループのカメラを消してから反映する(作り直し)
+// 戻り値: { summary, toasts, created:[カメラ], error }
+let _nextGenGroup = 1;
+function applyScriptOps(ops, opts) {
+  opts = opts || {};
   if (ops.length > SCRIPT_MAX_OPS) return { error: '操作が多すぎます' };
-  commitEdit();
+  if (!ops.length && opts.replaceGroup == null) return { summary: '変更はありませんでした', created: [] };
+  if (opts.history !== false) commitEdit();
   const before = _editorStateJson();
+  const created = [];
+  // 作り直し: 前に作ったカメラを消す(層・表示位置は引き継ぐ)
+  let inheritLayer = null, inheritDisplay = null, reuseIds = [];
+  if (opts.replaceGroup != null) {
+    const old = sceneCameras.filter(c => c.gen && c.gen.group === opts.replaceGroup).sort((a, b) => a.startTick - b.startTick);
+    reuseIds = old.map(c => c.id); // 同じIDを使い直す(選択・右パネルがそのまま続くように)
+    if (old.length) {
+      inheritLayer = Math.min(...old.map(c => c.layer));
+      inheritDisplay = old[0].display ? { ...old[0].display } : null;
+    }
+    sceneCameras = sceneCameras.filter(c => !(c.gen && c.gen.group === opts.replaceGroup));
+  }
+  if (opts.gen && opts.gen.group == null) {
+    for (const c of sceneCameras) if (c.gen && c.gen.group >= _nextGenGroup) _nextGenGroup = c.gen.group + 1;
+  }
+  const group = opts.gen ? (opts.gen.group != null ? opts.gen.group : _nextGenGroup++) : null;
   const tps = scTps();
   const maxTick = scMaxTick();
   const idMap = new Map(); // スクリプト内のID → カメラ
@@ -518,6 +646,15 @@ function applyScriptOps(ops) {
           if (s.name != null) cam.name = String(s.name).slice(0, 60);
           cam.display = _scriptDisplay(s.display);
           cam.layer = scFindFreeLayerFrom(Math.max(0, Math.round(_num(s.layer, 0))), cam.startTick, cam.endTick, cam.id);
+          if (reuseIds.length) cam.id = reuseIds.shift();
+          if (s.layer === undefined && inheritLayer != null) cam.layer = scFindFreeLayerFrom(inheritLayer, cam.startTick, cam.endTick, cam.id);
+          if (s.display === undefined && inheritDisplay && !created.length) cam.display = inheritDisplay;
+          if (opts.gen) {
+            cam.gen = { src: opts.gen.src || null, name: opts.gen.name || '', code: String(opts.gen.code || ''),
+                        params: { ...(opts.gen.params || {}) }, anchor: Math.round(_num(opts.gen.anchor, cam.startTick)), group,
+                        view: opts.gen.view || null, focusId: opts.gen.focusId != null ? String(opts.gen.focusId) : null };
+          }
+          created.push(cam);
           idMap.set(String(op.id), cam);
           count.add++;
         } else if (op.op === 'updateCamera') {
@@ -575,11 +712,16 @@ function applyScriptOps(ops) {
     return { error: e.message };
   }
   scCompactLayers();
+  for (const c of created) if (c.gen) c.gen.sig = scGenSignature(c);
   // 取り消し1回ぶんとして履歴に積む(実行前の状態を保存)
-  if (_editorStateJson() !== before) _pushHistory(before);
+  if (opts.history !== false && _editorStateJson() !== before) _pushHistory(before);
   if (selectId != null) {
     const c = findCam(selectId);
     if (c) { selectedCameraId = c.id; selectedKeyIndex = 0; selectedKeyExplicit = false; if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null; }
+  }
+  if (opts.selectFirst && selectId == null && created.length && !(opts.replaceGroup != null && scGetSelected())) {
+    selectedCameraId = created[0].id; selectedKeyIndex = 0; selectedKeyExplicit = false;
+    if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
   }
   if (!scGetSelected()) { selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false; }
   if (typeof pilot !== 'undefined' && pilot && !scGetCamera(pilot.camId)) exitPilot(true);
@@ -591,5 +733,27 @@ function applyScriptOps(ops) {
   if (count.update) parts.push(`${count.update}台を変更`);
   if (count.remove) parts.push(`${count.remove}台を削除`);
   if (count.text) parts.push(`テキストを${count.text}個追加`);
-  return { summary: parts.length ? parts.join('・') + 'しました' : '変更はありませんでした', toasts };
+  return { summary: parts.length ? parts.join('・') + 'しました' : '変更はありませんでした', toasts, created, group };
 }
+
+// スクリプトで作った直後のキーの「指紋」。手で直されたかどうかを見分けるのに使う
+function scGenSignature(cam) {
+  const str = JSON.stringify([cam.startTick, cam.endTick, cam.keys]);
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+function scGenEdited(cam) { return !!(cam.gen && cam.gen.sig && cam.gen.sig !== scGenSignature(cam)); }
+
+
+// 設定項目の読み取り(api.params の所まで動かす)は、同じコードなら結果を使い回す
+const _describeCache = new Map();
+async function describeScript(code) {
+  if (_describeCache.has(code)) return _describeCache.get(code);
+  const r = await runScriptSandboxed(code, 'describe', {});
+  const out = { ok: r.type === 'done', defs: r.defs || {}, info: r.info || null, message: r.message, line: r.line };
+  if (_describeCache.size > 200) _describeCache.clear();
+  _describeCache.set(code, out);
+  return out;
+}
+function describeScriptCached(code) { return _describeCache.get(code) || null; }

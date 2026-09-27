@@ -674,7 +674,6 @@ function openEditPanel(item) {
 }
 
 function _openEditPanelInner(item) {
-  if (typeof scriptPanel !== 'undefined') scriptPanel = null;
   const panel = document.getElementById('editPanel');
   const title = document.getElementById('editPanelTitle');
   const body = document.getElementById('editPanelBody');
@@ -761,8 +760,11 @@ function renderCameraEditFields(title, body, cam) {
   mk(inPilot ? '🎥 カメラ視点を終わる (V)' : '🎥 カメラ視点に入って動かす (V)', () => togglePilot(), true);
   mk('◆ 今の視点を、再生ヘッドの時刻に記録 (K)', () => actionRecordKey());
   mk('👁 このカメラが見える所へ移動', () => lookAtCameraFromOutside(cam));
-  mk('⭐ このカメラの動きをカスタム素材に保存', () => { if (typeof saveCameraAsCustomAsset === 'function') saveCameraAsCustomAsset(cam); });
+  mk('⭐ このカメラをカスタムに保存', () => { if (typeof saveCameraAsCustomAsset === 'function') saveCameraAsCustomAsset(cam); });
   body.appendChild(actions);
+
+  // スクリプトで作ったカメラ: そのスクリプトの設定(変えるとその場で作り直す)
+  if (cam.gen && typeof renderCameraGenSection === 'function') renderCameraGenSection(body, cam);
 
   // ---- 再生ヘッドの時刻の位置・角度 ----
   body.appendChild(_el('div', 'panelSectionLabel', '位置と角度(再生ヘッドの時刻)'));
@@ -1044,7 +1046,6 @@ function _curveIcon(c) {
 function closeEditPanel() {
   const wasExpanded = tlExpandedCamId();
   camPanel = null;
-  if (typeof scriptPanel !== 'undefined') scriptPanel = null;
   document.getElementById('editPanel').classList.remove('open');
   document.getElementById('editor').classList.remove('panelOpen');
   editPanelOpenFor = null;
@@ -1055,8 +1056,6 @@ function closeEditPanel() {
 // (何も選んでいない状態になったら閉じる)
 function refreshEditPanelIfOpen() {
   if (!editPanelOpenFor) return;
-  // スクリプトのパネルは、選択が変わっても開いたまま(対象の表示だけ直す)
-  if (editPanelOpenFor.kind === 'script') { if (typeof refreshScriptPanelTarget === 'function') refreshScriptPanelTarget(); return; }
   const item = getSelectedItem();
   if (item) openEditPanel(item); else closeEditPanel();
 }
