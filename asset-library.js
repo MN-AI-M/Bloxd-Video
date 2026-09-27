@@ -105,7 +105,7 @@ const ASSET_CATEGORIES = [
   { id: 'text', icon: '📝', label: 'テキスト' },
   { id: 'particle', icon: '💥', label: 'パーティクル' },
   { id: 'music', icon: '🎵', label: '音楽', soon: '音声ファイルを読み込んで、BGMや効果音として並べられるようにする予定です。' },
-  { id: 'pose', icon: '🕺', label: 'ポーズ', soon: 'プレイヤーの姿勢を決めて、タイムラインに並べられるようにする予定です。' },
+  { id: 'pose', icon: '🕺', label: 'ポーズ' },
   { id: 'effect', icon: '✨', label: 'エフェクト', soon: 'スロー・早送りや画面の効果などを追加する予定です。' },
 ];
 
@@ -196,6 +196,10 @@ function addAssetAt(key, tick) {
   // カメラの素材は、全部スクリプト(script-library.js)
   if (typeof isCameraScriptKey === 'function' && isCameraScriptKey(key)) {
     addCameraScriptAt(key, tick);
+    return;
+  }
+  if (typeof isPoseAssetKey === 'function' && isPoseAssetKey(key)) {
+    addPoseAsset(key, tick);
     return;
   }
   if (typeof isParticleAssetKey === 'function' && isParticleAssetKey(key)) {
@@ -369,6 +373,7 @@ function renderAssetList() {
     t.className = 'assetTab' + (id === activeAssetSource ? ' active' : '');
     const count = id !== 'custom' ? 0
       : (cat.id === 'particle' && typeof particleImageOrder !== 'undefined') ? particleImageOrder.length
+      : (cat.id === 'pose' && typeof customPoses !== 'undefined') ? customPoses.length
       : customAssets.filter(c => c.cat === cat.id).length;
     t.innerText = label + (count ? ` ${count}` : '');
     t.addEventListener('click', () => { activeAssetSource = id; openAssetSettingsKey = null; renderAssetList(); });
@@ -388,6 +393,7 @@ function renderAssetList() {
 
   if (cat.id === 'camera' && typeof renderCameraAssets === 'function') renderCameraAssets(list, activeAssetSource);
   else if (cat.id === 'particle' && typeof renderParticleAssets === 'function') renderParticleAssets(list, activeAssetSource);
+  else if (cat.id === 'pose' && typeof renderPoseAssets === 'function') renderPoseAssets(list, activeAssetSource);
   else if (activeAssetSource === 'official') _renderOfficial(list, cat);
   else if (activeAssetSource === 'custom') _renderCustom(list, cat);
   else _renderPublic(list, cat);

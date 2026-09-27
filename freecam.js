@@ -422,6 +422,12 @@ function computeSubRects(vx, vy, vw, vh, n) {
 }
 
 function renderPreviewComposite(gl, isMain, tick) {
+  if (typeof _poseDrawingPreview !== 'undefined') _poseDrawingPreview = true; // プレビューには選択の色を出さない
+  try { _renderPreviewCompositeInner(gl, isMain, tick); }
+  finally { if (typeof _poseDrawingPreview !== 'undefined') _poseDrawingPreview = false; }
+}
+
+function _renderPreviewCompositeInner(gl, isMain, tick) {
   const W = fcCanvas.width, H = fcCanvas.height;
   const base = isMain ? [0, 0, W, H] : [W - PINP_W - PINP_MARGIN, PINP_MARGIN, PINP_W, PINP_H];
   const [vx, vy, vw, vh] = previewRectGL(isMain);
@@ -770,6 +776,7 @@ function onViewportMouseDown(e) {
         const part = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
         if (part) { beginEdit(); beginGizmoDrag(part, active, mx, my, e.shiftKey); return; }
       }
+      if (typeof poseMouseDown === 'function' && poseMouseDown(e, mx, my)) return;
       const pActive = _particleGizmoPose();
       if (pActive) {
         const part = pickTransformGizmoPart(pActive, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
@@ -809,6 +816,11 @@ function startLook() {
 }
 
 function onDocMouseMove(e) {
+  if (typeof poseDrag !== 'undefined' && poseDrag) {
+    const [mx, my] = _canvasMouse(e);
+    poseDragMove(mx, my);
+    return;
+  }
   if (dragState) {
     const [mx, my] = _canvasMouse(e);
     applyGizmoDrag(mx, my);
@@ -850,11 +862,14 @@ function onDocMouseMove(e) {
         || (hasParticles && !!pfPick(mx, my, view, proj, fcCanvas.width, fcCanvas.height));
     }
     gizmoHoverPart = hover;
-    fcCanvas.style.cursor = hover ? 'grab' : (overCam ? 'pointer' : 'default');
+    let poseCursor = false;
+    if (!hover && typeof poseHoverAt === 'function') { const [mx, my] = _canvasMouse(e); poseCursor = poseHoverAt(mx, my); }
+    fcCanvas.style.cursor = hover ? 'grab' : (poseCursor || (overCam ? 'pointer' : 'default'));
   }
 }
 
 function onDocMouseUp(e) {
+  if (e.button === 0 && typeof poseDrag !== 'undefined' && poseDrag) poseDragEnd();
   if (e.button === 0 && dragState) {
     dragState = null;
     commitEdit();
@@ -930,6 +945,8 @@ function currentContextHint() {
     return `ドラッグで見回す+WASDで構図を調整 → ${k} / V・Escで戻る`;
   }
   if (previewIsMain) return '書き出される映像のプレビュー / 右下の小窓クリック、または視点を動かすと編集視点に戻ります';
+  const poseHint = (typeof poseContextHint === 'function') ? poseContextHint() : null;
+  if (poseHint) return poseHint;
   const pSel = (typeof pfGetSelected === 'function') ? pfGetSelected() : null;
   if (pSel) {
     return `矢印のドラッグで${pSel.name}を動かす / リングで向きを変える / ダブルクリック: 設定(写真・カケラの形・飛び方) / Delete:削除`;
@@ -1002,6 +1019,7 @@ function renderFreecam() {
     if (typeof renderParticles === 'function') renderParticles(fcGl, editVP.view, editVP.proj, tick);
     renderCameraGizmos(fcGl, editVP.view, editVP.proj, W, H, { hideCamId: pilot ? pilot.camId : null });
     if (!pilot && typeof renderParticleGizmos === 'function') renderParticleGizmos(fcGl, editVP.view, editVP.proj, W, H);
+    if (!pilot && !navLook && typeof renderPoseGizmos === 'function') renderPoseGizmos(fcGl, editVP.view, editVP.proj, W, H);
     const active = scGetActivePoint() || _particleGizmoPose();
     if (active && !pilot && !navLook) {
       renderTransformGizmo(fcGl, editVP.view, editVP.proj, active, W, H, dragState ? dragState.part : null);

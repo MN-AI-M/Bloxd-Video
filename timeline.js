@@ -162,6 +162,7 @@ function timelineRefresh() {
   timelineRenderBlocks();
   if (typeof renderTextTrackBlocks === 'function') renderTextTrackBlocks();
   if (typeof renderParticleTrackBlocks === 'function') renderParticleTrackBlocks();
+  if (typeof renderPoseTrackBlocks === 'function') renderPoseTrackBlocks();
   timelineUpdatePlayhead();
   refreshEditPanelIfOpen();
   updateTimelineToolbar();
@@ -500,6 +501,13 @@ function tlSnapCandidates(exclude, includeOwnKeys) {
       c.push(b.startTick, b.endTick);
     }
   }
+  if (typeof poseBlocks !== 'undefined') {
+    for (const b of poseBlocks) {
+      const self = exclude && exclude.kind === 'pose' && exclude.id === b.id;
+      if (!self) c.push(b.startTick, b.endTick);
+      if (!self || includeOwnKeys) for (const k of b.keys) c.push(b.startTick + (k.time - b.offsetSec) * scTps());
+    }
+  }
   return c;
 }
 
@@ -538,6 +546,7 @@ function tlScrubTo(e) {
 function _tlFindItem(kind, id) {
   if (kind === 'camera') return scGetCamera(id);
   if (kind === 'particle') return (typeof pfGet === 'function') ? pfGet(id) : null;
+  if (kind === 'pose') return (typeof poseGet === 'function') ? poseGet(id) : null;
   return (typeof textBlocks !== 'undefined') ? textBlocks.find(t => t.id === id) || null : null;
 }
 
@@ -633,6 +642,7 @@ function tlOnMouseMove(e) {
   timelineRenderBlocks();
   if (typeof renderTextTrackBlocks === 'function') renderTextTrackBlocks();
   if (typeof renderParticleTrackBlocks === 'function') renderParticleTrackBlocks();
+  if (typeof renderPoseTrackBlocks === 'function') renderPoseTrackBlocks();
 }
 
 function tlOnMouseUp() {
@@ -661,6 +671,7 @@ function tlOnMouseUp() {
   if (!d.moved) {
     if (d.kind === 'camera') selectCamera(item.id, null, false);
     else if (d.kind === 'particle') selectParticle(item.id);
+    else if (d.kind === 'pose') selectPose(item.id);
     else selectText(item.id);
     commitEdit();
     return;
@@ -672,6 +683,8 @@ function tlOnMouseUp() {
     selectCamera(item.id, selectedCameraId === item.id ? selectedKeyIndex : null, false);
   } else if (d.kind === 'particle') {
     selectParticle(item.id);
+  } else if (d.kind === 'pose') {
+    selectPose(item.id);
   } else {
     selectText(item.id);
   }
@@ -717,6 +730,11 @@ function _openEditPanelInner(item) {
   if (item.kind === 'particle') {
     editPanelOpenFor = { kind: 'particle', id: item.id };
     renderParticleEditFields(title, body, item);
+    return;
+  }
+  if (item.kind === 'pose') {
+    editPanelOpenFor = { kind: 'pose', id: item.id };
+    renderPoseEditFields(title, body, item);
     return;
   }
   editPanelOpenFor = { kind: 'camera', id: item.id };

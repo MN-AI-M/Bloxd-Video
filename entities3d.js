@@ -247,7 +247,10 @@ function modelMatrixYaw(x, y, z, yaw) { return mat4Multiply(mat4Translate(x, y, 
 // ============================================================
 
 function renderHumanoids(gl, viewMatrix, projMatrix, tick) {
-  if (!ent3dProgram || !allTimelines || !allTimelines.entities) return;
+  if (!ent3dProgram) return;
+  // 手足の関節があるモデル(ポーズ・人形)は poses.js が描く
+  if (typeof renderPosedHumanoids === 'function') { renderPosedHumanoids(gl, viewMatrix, projMatrix, tick); return; }
+  if (!allTimelines || !allTimelines.entities) return;
   gl.useProgram(ent3dProgram);
   gl.bindBuffer(gl.ARRAY_BUFFER, ent3dVbo);
   gl.bufferData(gl.ARRAY_BUFFER, humanoidVertexData, gl.STATIC_DRAW);

@@ -27,6 +27,8 @@ function _editorStateSnapshot() {
     nextTextBlockId: (typeof nextTextBlockId !== 'undefined') ? nextTextBlockId : 1,
     particleBlocks: (typeof particleBlocks !== 'undefined') ? particleBlocks : [],
     nextParticleBlockId: (typeof nextParticleBlockId !== 'undefined') ? nextParticleBlockId : 1,
+    poseBlocks: (typeof poseBlocks !== 'undefined') ? poseBlocks : [],
+    nextPoseBlockId: (typeof nextPoseBlockId !== 'undefined') ? nextPoseBlockId : 1,
   };
 }
 function _editorStateJson() { return JSON.stringify(_editorStateSnapshot()); }
@@ -39,6 +41,12 @@ function _restoreEditorState(json) {
   if (typeof particleBlocks !== 'undefined') {
     particleBlocks = s.particleBlocks || []; nextParticleBlockId = s.nextParticleBlockId || 1;
     if (selectedParticleId != null && !particleBlocks.some(b => b.id === selectedParticleId)) selectedParticleId = null;
+  }
+  if (typeof poseBlocks !== 'undefined') {
+    poseBlocks = s.poseBlocks || []; nextPoseBlockId = s.nextPoseBlockId || 1;
+    const pb = poseGetSelected();
+    if (selectedPoseId != null && !pb) selectedPoseId = null;
+    if (pb && poseSelKey != null && poseSelKey >= pb.keys.length) poseSelKey = null;
   }
   // 選択中の物が消えていたら選択を外す(残っていれば選択を保つ)
   const cam = scGetSelected();
@@ -115,6 +123,7 @@ function selectCamera(id, keyIndex, explicit) {
   selectedKeyExplicit = !!explicit;
   if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
   if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
+  if (typeof selectedPoseId !== 'undefined') selectedPoseId = null;
   editorChanged();
 }
 
@@ -122,6 +131,7 @@ function selectText(id) {
   selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false;
   selectedTextBlockId = id;
   if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
+  if (typeof selectedPoseId !== 'undefined') selectedPoseId = null;
   editorChanged();
 }
 
@@ -129,6 +139,16 @@ function selectParticle(id) {
   selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false;
   if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
   selectedParticleId = id;
+  if (typeof selectedPoseId !== 'undefined') selectedPoseId = null;
+  editorChanged();
+}
+
+function selectPose(id) {
+  selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false;
+  if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
+  if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
+  if (selectedPoseId !== id) { poseSelKey = null; poseSelKeyExplicit = false; }
+  selectedPoseId = id;
   editorChanged();
 }
 
@@ -136,6 +156,7 @@ function clearSelection() {
   selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false;
   if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
   if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
+  if (typeof selectedPoseId !== 'undefined') selectedPoseId = null;
   editorChanged();
 }
 
@@ -146,6 +167,7 @@ function getSelectedItem() {
     return textBlocks.find(t => t.id === selectedTextBlockId) || null;
   }
   if (typeof selectedParticleId !== 'undefined' && selectedParticleId != null) return pfGet(selectedParticleId);
+  if (typeof selectedPoseId !== 'undefined' && selectedPoseId != null) return poseGet(selectedPoseId);
   return null;
 }
 
@@ -198,6 +220,20 @@ function deleteSelection() {
     editorChanged();
     return;
   }
+  if (text && text.kind === 'pose') {
+    pushUndo();
+    if (poseSelKeyExplicit && poseSelKey != null && text.keys.length > 1 && text.keys[poseSelKey]) {
+      text.keys.splice(poseSelKey, 1);
+      poseSelKey = null; poseSelKeyExplicit = false;
+      showToast('◆ キーを削除しました');
+    } else {
+      poseDeleteBlock(text.id);
+      selectedPoseId = null;
+      showToast('🗑 ポーズを削除しました');
+    }
+    editorChanged();
+    return;
+  }
   showToast('削除するものを選んでください');
 }
 
@@ -215,6 +251,9 @@ function splitSelectionAtPlayhead() {
   } else if (item.kind === 'particle') {
     const right = pfSplitBlock(item, curTick);
     if (right) selectParticle(right.id);
+  } else if (item.kind === 'pose') {
+    const right = poseSplitBlock(item, curTick);
+    if (right) selectPose(right.id);
   } else {
     const right = scSplitCamera(item, curTick);
     if (right) selectCamera(right.id, 0, false);
@@ -232,6 +271,9 @@ function duplicateSelection() {
   } else if (item.kind === 'particle') {
     const dup = pfDuplicateBlock(item);
     selectParticle(dup.id);
+  } else if (item.kind === 'pose') {
+    const dup = poseDuplicateBlock(item);
+    selectPose(dup.id);
   } else {
     const dup = scDuplicateCamera(item);
     selectCamera(dup.id, 0, false);
