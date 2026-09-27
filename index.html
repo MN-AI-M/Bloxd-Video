@@ -154,6 +154,65 @@
   .assetRename { font-size:12px; padding:2px 5px; width:100%; }
   .assetIo { display:flex; gap:6px; }
   .assetIo .btn { flex:1; justify-content:center; padding:6px 8px; }
+  .assetThumb.script { background: linear-gradient(160deg, #123a2c, #1b1f27); }
+
+  /* スクリプトの右パネル */
+  .scriptDesc { color: var(--ink); }
+  .scriptParams { display:flex; flex-direction:column; gap:10px; }
+  .scriptCheck { display:flex; align-items:center; gap:8px; font-size:12.5px; cursor:pointer; }
+  .scriptCheck input { accent-color: var(--gold); width:15px; height:15px; }
+  .scriptProgress { height:4px; border-radius:2px; background: var(--surface-2); overflow:hidden; display:none; }
+  .scriptProgress.show { display:block; }
+  .scriptProgressBar { height:100%; width:0; background: var(--emerald); transition: width .1s linear; }
+  .scriptResult { display:flex; flex-direction:column; gap:6px; }
+  .scriptResult:empty { display:none; }
+  .scriptMsg { font-size:12.5px; line-height:1.55; padding:8px 10px; border-radius:7px; background: var(--surface-2); }
+  .scriptMsg.ok { color: var(--emerald); }
+  .scriptMsg.warn { color:#F0C070; border:1px dashed #6a5420; }
+  .scriptMsg.error { color:#F29A9A; border:1px solid #5a2a2a; }
+  .scriptLog { margin:0; max-height:180px; overflow:auto; font-size:11.5px; line-height:1.5; padding:8px 10px;
+               border-radius:7px; background: var(--bg); border:1px solid var(--border); color: var(--muted); white-space:pre-wrap; }
+
+  /* スクリプトのコードエディタ(全画面) */
+  #scriptEditor { position:fixed; inset:0; z-index:30; display:none; align-items:center; justify-content:center;
+                  background:rgba(5,6,9,0.66); backdrop-filter: blur(2px); }
+  #scriptEditor.open { display:flex; }
+  #scriptEditorBox { width:min(1280px, calc(100vw - 32px)); height:calc(100vh - 40px); background: var(--surface);
+                     border:1px solid var(--border); border-radius: var(--radius); display:flex; flex-direction:column;
+                     overflow:hidden; box-shadow:0 16px 48px rgba(0,0,0,0.5); }
+  #scriptEditorHead { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  #scriptEditorHead .seIcon { font-size:18px; }
+  #scriptEditorName { flex:0 1 260px; }
+  #scriptEditorBadge { font-size:11.5px; color: var(--gold); white-space:nowrap; }
+  #scriptEditorClose { background:none; border:none; color: var(--muted); font-size:18px; cursor:pointer; padding:4px 6px; }
+  #scriptEditorClose:hover { color: var(--ink); }
+  #scriptEditor #scriptEditorCopy { display:none; }
+  #scriptEditor.readonly #scriptEditorCopy { display:inline-flex; }
+  #scriptEditor.readonly #scriptEditorSave, #scriptEditor.readonly #scriptEditorRun { display:none; }
+  #scriptEditorMain { flex:1; min-height:0; display:flex; }
+  #scriptEditorCodeWrap { flex:1; min-width:0; display:flex; background:#0d1016; }
+  #scriptEditorGutter { margin:0; padding:12px 8px 12px 12px; min-width:44px; text-align:right; color:#4b5364; overflow:hidden;
+                        font:12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; user-select:none; border-right:1px solid var(--border); }
+  #scriptEditorCode { flex:1; min-width:0; resize:none; border:none; outline:none; background:transparent; color:#E6E3DA;
+                      padding:12px 14px; font:12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size:2; white-space:pre; }
+  #scriptEditor.readonly #scriptEditorCode { color:#C9C5BB; }
+  #scriptEditorDocs { width:400px; flex-shrink:0; overflow-y:auto; border-left:1px solid var(--border); padding:4px 16px 20px;
+                      font-size:12.5px; line-height:1.65; color: var(--ink); }
+  #scriptEditor.docsHidden #scriptEditorDocs { display:none; }
+  #scriptEditorDocs h3 { font-family: var(--font-display); font-size:14px; margin:14px 0 6px; }
+  #scriptEditorDocs h4 { font-size:12px; color: var(--gold); margin:14px 0 4px; }
+  #scriptEditorDocs p { margin:4px 0; }
+  #scriptEditorDocs .note { color: var(--muted); font-size:11.5px; }
+  #scriptEditorDocs table { border-collapse:collapse; width:100%; }
+  #scriptEditorDocs td { padding:4px 0; vertical-align:top; border-bottom:1px solid #1f2430; }
+  #scriptEditorDocs td:first-child { padding-right:10px; width:56%; }
+  #scriptEditorDocs code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11.5px; color:#9FD8C0;
+                           word-break:break-word; }
+  #scriptEditorStatus { padding:7px 14px; font-size:12px; color: var(--muted); border-top:1px solid var(--border); min-height:32px; }
+  #scriptEditorStatus.ok { color: var(--emerald); }
+  #scriptEditorStatus.error { color:#F29A9A; }
+  @media (max-width: 1000px) { #scriptEditorDocs { width:300px; } }
+
   /* 素材をドラッグしている間は、落とせる場所を縁取りで示す */
   body.assetDragging #timelineScroll, body.assetDragging #freecamArea { outline:2px dashed rgba(232,163,61,0.6); outline-offset:-3px; }
 
@@ -554,6 +613,7 @@
         <h3>カメラ</h3>
         <table>
           <tr><td>素材一覧</td><td>後ろから・周りを回る等のカメラを追加(⚙で秒数・距離など)</td></tr>
+          <tr><td>🧩 スクリプト</td><td>障害物よけ・目線合わせ・自動カット割りなどを自動で。自分で書くこともできる</td></tr>
           <tr><td><kbd>F</kbd></td><td>今の構図で、再生ヘッドの位置にカメラを置く</td></tr>
           <tr><td><kbd>K</kbd></td><td>今の構図を、再生ヘッドの時刻のキーとして記録</td></tr>
           <tr><td><kbd>V</kbd></td><td>選択中のカメラの目線に入る/戻る</td></tr>
@@ -629,6 +689,8 @@
 <script src="timeline.js"></script>
 <script src="content-blocks.js"></script>
 <script src="asset-library.js"></script>
+<script src="script-runner.js"></script>
+<script src="script-library.js"></script>
 <script src="project-settings.js"></script>
 <script src="ui.js"></script>
 </body>

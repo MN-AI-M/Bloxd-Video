@@ -171,6 +171,7 @@ for (const item of OFFICIAL_ASSETS.text) {
 const ASSET_CATEGORIES = [
   { id: 'camera', icon: '🎥', label: 'カメラ' },
   { id: 'text', icon: '📝', label: 'テキスト' },
+  { id: 'script', icon: '🧩', label: 'スクリプト' },
   { id: 'music', icon: '🎵', label: '音楽', soon: '音声ファイルを読み込んで、BGMや効果音として並べられるようにする予定です。' },
   { id: 'pose', icon: '🕺', label: 'ポーズ', soon: 'プレイヤーの姿勢を決めて、タイムラインに並べられるようにする予定です。' },
   { id: 'effect', icon: '✨', label: 'エフェクト', soon: 'スロー・早送りや画面の効果などを追加する予定です。' },
@@ -260,6 +261,13 @@ function addAssetAt(key, tick) {
   if (typeof stopPlayback === 'function') stopPlayback();
   tick = Math.max(0, Math.round(tick));
   const [a, b] = String(key).split(':');
+  // スクリプト: その時刻に再生ヘッドを動かして、右パネル(設定と ▶実行)を開く
+  const isScript = a === 'script' || (a === 'custom' && customAssets.some(x => x.id === b && x.type === 'script'));
+  if (isScript) {
+    seekTo(tick);
+    if (typeof openScriptPanel === 'function') openScriptPanel(key);
+    return;
+  }
   if (a === 'custom') {
     const c = customAssets.find(x => x.id === b);
     if (c) _addCustomAsset(c, tick);
@@ -471,7 +479,8 @@ function renderAssetList() {
     return;
   }
 
-  if (activeAssetSource === 'official') _renderOfficial(list, cat);
+  if (cat.id === 'script' && typeof renderScriptAssets === 'function') renderScriptAssets(list, activeAssetSource);
+  else if (activeAssetSource === 'official') _renderOfficial(list, cat);
   else if (activeAssetSource === 'custom') _renderCustom(list, cat);
   else _renderPublic(list, cat);
   list.scrollTop = keepScroll;

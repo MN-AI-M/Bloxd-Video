@@ -674,6 +674,7 @@ function openEditPanel(item) {
 }
 
 function _openEditPanelInner(item) {
+  if (typeof scriptPanel !== 'undefined') scriptPanel = null;
   const panel = document.getElementById('editPanel');
   const title = document.getElementById('editPanelTitle');
   const body = document.getElementById('editPanelBody');
@@ -1043,6 +1044,7 @@ function _curveIcon(c) {
 function closeEditPanel() {
   const wasExpanded = tlExpandedCamId();
   camPanel = null;
+  if (typeof scriptPanel !== 'undefined') scriptPanel = null;
   document.getElementById('editPanel').classList.remove('open');
   document.getElementById('editor').classList.remove('panelOpen');
   editPanelOpenFor = null;
@@ -1053,6 +1055,8 @@ function closeEditPanel() {
 // (何も選んでいない状態になったら閉じる)
 function refreshEditPanelIfOpen() {
   if (!editPanelOpenFor) return;
+  // スクリプトのパネルは、選択が変わっても開いたまま(対象の表示だけ直す)
+  if (editPanelOpenFor.kind === 'script') { if (typeof refreshScriptPanelTarget === 'function') refreshScriptPanelTarget(); return; }
   const item = getSelectedItem();
   if (item) openEditPanel(item); else closeEditPanel();
 }

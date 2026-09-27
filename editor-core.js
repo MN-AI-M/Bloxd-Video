@@ -245,6 +245,7 @@ function setupEditorShortcuts() {
       return; // 文字を打っている最中は、Backspace等を一切横取りしない
     }
     if (document.getElementById('settingsModal').classList.contains('open')) return;
+    if (typeof isScriptEditorOpen === 'function' && isScriptEditorOpen()) return;
 
     const flying = (typeof isFlightControlActive === 'function') && isFlightControlActive();
     const mod = e.ctrlKey || e.metaKey;
