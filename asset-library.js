@@ -103,6 +103,7 @@ for (const item of OFFICIAL_ASSETS.text) {
 const ASSET_CATEGORIES = [
   { id: 'camera', icon: '🎥', label: 'カメラ' },
   { id: 'text', icon: '📝', label: 'テキスト' },
+  { id: 'particle', icon: '💥', label: 'パーティクル' },
   { id: 'music', icon: '🎵', label: '音楽', soon: '音声ファイルを読み込んで、BGMや効果音として並べられるようにする予定です。' },
   { id: 'pose', icon: '🕺', label: 'ポーズ', soon: 'プレイヤーの姿勢を決めて、タイムラインに並べられるようにする予定です。' },
   { id: 'effect', icon: '✨', label: 'エフェクト', soon: 'スロー・早送りや画面の効果などを追加する予定です。' },
@@ -195,6 +196,10 @@ function addAssetAt(key, tick) {
   // カメラの素材は、全部スクリプト(script-library.js)
   if (typeof isCameraScriptKey === 'function' && isCameraScriptKey(key)) {
     addCameraScriptAt(key, tick);
+    return;
+  }
+  if (typeof isParticleAssetKey === 'function' && isParticleAssetKey(key)) {
+    addParticleAsset(key, tick);
     return;
   }
   if (a === 'custom') {
@@ -311,6 +316,7 @@ function importCustomAssetsFromText(text) {
 
 function assetLibraryInit() {
   if (typeof cameraScriptsInit === 'function') cameraScriptsInit();
+  if (typeof particleImagesInit === 'function') particleImagesInit();
   renderAssetRail();
   renderAssetList();
   setupAssetDropTargets();
@@ -361,7 +367,9 @@ function renderAssetList() {
     const t = document.createElement('button');
     t.type = 'button';
     t.className = 'assetTab' + (id === activeAssetSource ? ' active' : '');
-    const count = id === 'custom' ? customAssets.filter(c => c.cat === cat.id).length : 0;
+    const count = id !== 'custom' ? 0
+      : (cat.id === 'particle' && typeof particleImageOrder !== 'undefined') ? particleImageOrder.length
+      : customAssets.filter(c => c.cat === cat.id).length;
     t.innerText = label + (count ? ` ${count}` : '');
     t.addEventListener('click', () => { activeAssetSource = id; openAssetSettingsKey = null; renderAssetList(); });
     tabs.appendChild(t);
@@ -379,6 +387,7 @@ function renderAssetList() {
   }
 
   if (cat.id === 'camera' && typeof renderCameraAssets === 'function') renderCameraAssets(list, activeAssetSource);
+  else if (cat.id === 'particle' && typeof renderParticleAssets === 'function') renderParticleAssets(list, activeAssetSource);
   else if (activeAssetSource === 'official') _renderOfficial(list, cat);
   else if (activeAssetSource === 'custom') _renderCustom(list, cat);
   else _renderPublic(list, cat);
@@ -644,6 +653,9 @@ function setupAssetDropTargets() {
   area.addEventListener('drop', (e) => {
     if (!_isAssetDrag(e)) return;
     e.preventDefault();
-    addAssetAt(e.dataTransfer.getData(ASSET_DRAG_TYPE), curTick);
+    // パーティクルは、落とした所に置く(particles.js がこの位置を使う)
+    if (typeof pfDropClientPoint !== 'undefined') pfDropClientPoint = { x: e.clientX, y: e.clientY };
+    try { addAssetAt(e.dataTransfer.getData(ASSET_DRAG_TYPE), curTick); }
+    finally { if (typeof pfDropClientPoint !== 'undefined') pfDropClientPoint = null; }
   });
 }

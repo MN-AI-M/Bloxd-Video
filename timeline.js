@@ -161,6 +161,7 @@ function timelineRefresh() {
   tlRenderRuler();
   timelineRenderBlocks();
   if (typeof renderTextTrackBlocks === 'function') renderTextTrackBlocks();
+  if (typeof renderParticleTrackBlocks === 'function') renderParticleTrackBlocks();
   timelineUpdatePlayhead();
   refreshEditPanelIfOpen();
   updateTimelineToolbar();
@@ -493,6 +494,12 @@ function tlSnapCandidates(exclude, includeOwnKeys) {
       c.push(t.startTick, t.endTick);
     }
   }
+  if (typeof particleBlocks !== 'undefined') {
+    for (const b of particleBlocks) {
+      if (exclude && exclude.kind === 'particle' && exclude.id === b.id) continue;
+      c.push(b.startTick, b.endTick);
+    }
+  }
   return c;
 }
 
@@ -530,6 +537,7 @@ function tlScrubTo(e) {
 
 function _tlFindItem(kind, id) {
   if (kind === 'camera') return scGetCamera(id);
+  if (kind === 'particle') return (typeof pfGet === 'function') ? pfGet(id) : null;
   return (typeof textBlocks !== 'undefined') ? textBlocks.find(t => t.id === id) || null : null;
 }
 
@@ -545,6 +553,7 @@ function tlStartBlockDrag(e, kind, item) {
     startX: e.clientX, startY: e.clientY,
     origStart: item.startTick, origEnd: item.endTick, origLayer: item.layer || 0,
     origKeyTimes: item.keys ? item.keys.map(k => k.time) : null,
+    origOffset: item.offsetSec || 0,
   };
 }
 
@@ -609,14 +618,21 @@ function tlOnMouseMove(e) {
       const shift = (start - tlDrag.origStart) / tps;
       item.keys.forEach((k, j) => { k.time = tlDrag.origKeyTimes[j] - shift; });
     }
+    // パーティクルも、動きの絶対時刻を保つ(左端を詰めると、途中から始まる)
+    if (tlDrag.kind === 'particle') {
+      item.offsetSec = Math.max(0, tlDrag.origOffset + (start - tlDrag.origStart) / tps);
+      item.autoLen = false;
+    }
   } else if (tlDrag.mode === 'resize-right') {
     const sn = tlSnap(tlDrag.origEnd + dTicks, cands, e);
     snappedAt = sn.snapped;
     item.endTick = Math.min(maxTick, Math.max(tlDrag.origStart + 1, Math.round(sn.tick)));
+    if (tlDrag.kind === 'particle') item.autoLen = false;
   }
   tlShowSnapLine(snappedAt);
   timelineRenderBlocks();
   if (typeof renderTextTrackBlocks === 'function') renderTextTrackBlocks();
+  if (typeof renderParticleTrackBlocks === 'function') renderParticleTrackBlocks();
 }
 
 function tlOnMouseUp() {
@@ -643,7 +659,9 @@ function tlOnMouseUp() {
   const item = _tlFindItem(d.kind, d.id);
   if (!item) { commitEdit(); return; }
   if (!d.moved) {
-    if (d.kind === 'camera') selectCamera(item.id, null, false); else selectText(item.id);
+    if (d.kind === 'camera') selectCamera(item.id, null, false);
+    else if (d.kind === 'particle') selectParticle(item.id);
+    else selectText(item.id);
     commitEdit();
     return;
   }
@@ -652,6 +670,8 @@ function tlOnMouseUp() {
     item.layer = scFindFreeLayerFrom(item.layer, item.startTick, item.endTick, item.id);
     scCompactLayers();
     selectCamera(item.id, selectedCameraId === item.id ? selectedKeyIndex : null, false);
+  } else if (d.kind === 'particle') {
+    selectParticle(item.id);
   } else {
     selectText(item.id);
   }
@@ -664,7 +684,7 @@ function tlOnMouseUp() {
 // カメラブロック・テキストブロックで共通のDOM(#editPanel)を使い回す。
 // ============================================================
 
-let editPanelOpenFor = null; // { kind:'camera'|'text', id } | null
+let editPanelOpenFor = null; // { kind:'camera'|'text'|'particle', id } | null
 let editPanelPointerDown = false; // パネルの中でマウスボタンを押している最中か
 
 function openEditPanel(item) {
@@ -692,6 +712,11 @@ function _openEditPanelInner(item) {
     editPanelOpenFor = { kind: 'text', id: item.id };
     title.innerText = '📝 テキストを編集';
     if (typeof renderTextEditFields === 'function') renderTextEditFields(body, item);
+    return;
+  }
+  if (item.kind === 'particle') {
+    editPanelOpenFor = { kind: 'particle', id: item.id };
+    renderParticleEditFields(title, body, item);
     return;
   }
   editPanelOpenFor = { kind: 'camera', id: item.id };

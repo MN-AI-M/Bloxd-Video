@@ -154,6 +154,16 @@
   .assetRename { font-size:12px; padding:2px 5px; width:100%; }
   .assetIo { display:flex; gap:6px; }
   .assetIo .btn { flex:1; justify-content:center; padding:6px 8px; }
+  .assetThumb.particle { background: linear-gradient(160deg, #0f3a3a, #1b1f27); background-size:cover; background-position:center;
+                         text-shadow:0 1px 4px rgba(0,0,0,0.8); }
+  .pfUploadBtn { justify-content:center; }
+  .pfImageGrid { display:grid; grid-template-columns: repeat(5, 1fr); gap:6px; }
+  .pfImageTile { aspect-ratio:1; border-radius:7px; border:1.5px solid var(--border); cursor:pointer; padding:0;
+                 background-color: var(--surface-2); background-size:cover; background-position:center;
+                 color: var(--ink); font-size:18px; }
+  .pfImageTile:hover { border-color: var(--muted); }
+  .pfImageTile.active { border-color: var(--gold); box-shadow:0 0 0 2px rgba(232,163,61,0.35); }
+  .pfImageTile.add { border-style:dashed; }
   .assetThumb.script { background: linear-gradient(160deg, #123a2c, #1b1f27); }
 
   /* スクリプトの右パネル */
@@ -318,6 +328,11 @@
   .tlBlock.cam.selected { background: rgba(232,163,61,0.42); box-shadow: inset 0 0 0 1.5px var(--ink); }
   .tlBlock.text { background: rgba(139,127,232,0.22); border-color: var(--amethyst); }
   .tlBlock.text.selected { background: rgba(139,127,232,0.45); box-shadow: inset 0 0 0 1.5px var(--ink); }
+  .tlBlock.particle { background: rgba(62,207,142,0.18); border-color: var(--emerald); }
+  .tlBlock.particle.selected { background: rgba(62,207,142,0.4); box-shadow: inset 0 0 0 1.5px var(--ink); }
+  .tlBlockThumb { position:absolute; left:4px; top:3px; bottom:3px; width:20px; border-radius:3px;
+                  background-size:cover; background-position:center; pointer-events:none; }
+  .tlBlockLabel.withThumb { left:28px; }
   .tlBlockLabel { position:absolute; left:8px; top:3px; right:36px; font-size:11px; font-weight:700; color: var(--ink);
                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
   .tlBlockDur { position:absolute; right:7px; bottom:2px; font-size:9.5px; color: var(--muted); pointer-events:none; }
@@ -573,6 +588,10 @@
           <div class="tlHeader"><span>📝 テキスト</span></div>
           <div class="tlLane" id="timelineTextLane"></div>
         </div>
+        <div class="tlRow" id="timelineParticleRow">
+          <div class="tlHeader"><span>✨ パーティクル</span></div>
+          <div class="tlLane" id="timelineParticleLane"></div>
+        </div>
         <div id="timelinePlayhead"></div>
         <div id="timelineSnapLine"></div>
       </div>
@@ -647,6 +666,7 @@
           <tr><td><kbd>Ctrl/Cmd</kbd>+<kbd>D</kbd></td><td>複製</td></tr>
           <tr><td><kbd>Delete</kbd></td><td>削除(◆を選んでいればそのポイントだけ)</td></tr>
           <tr><td>ダブルクリック</td><td>編集パネルを開く</td></tr>
+          <tr><td>パーティクル</td><td>左の「💥 パーティクル」から。写真を読み込んで割れる・広がる動きにできる。3Dの矢印で位置、リングで向き</td></tr>
           <tr><td><kbd>Esc</kbd></td><td>カメラ視点・パネルを閉じる / 選択を外す</td></tr>
         </table>
       </div>
@@ -690,6 +710,7 @@
 <script src="editor-core.js"></script>
 <script src="timeline.js"></script>
 <script src="content-blocks.js"></script>
+<script src="particles.js"></script>
 <script src="asset-library.js"></script>
 <script src="script-runner.js"></script>
 <script src="script-library.js"></script>

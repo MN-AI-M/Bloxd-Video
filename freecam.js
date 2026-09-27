@@ -460,6 +460,7 @@ function renderPreviewComposite(gl, isMain, tick) {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     drawTerrainWithMatrices(view, proj, rx, ry, rw, rh);
     renderHumanoids(gl, view, proj, _fcCurTickVal());
+    if (typeof renderParticles === 'function') renderParticles(gl, view, proj, tick);
   });
   gl.disable(gl.SCISSOR_TEST);
 }
@@ -470,6 +471,9 @@ function renderPreviewComposite(gl, isMain, tick) {
 // ============================================================
 
 function ensureEditView() { previewIsMain = false; }
+
+// 選んでいるパーティクルのギズモの姿勢(無ければ null)
+function _particleGizmoPose() { return (typeof pfGizmoPose === 'function') ? pfGizmoPose() : null; }
 
 // F: 今見えている構図で、再生ヘッドの位置に新しいカメラを置く
 function actionNewCamera() {
@@ -597,15 +601,17 @@ function syncFovSliderUI() {
 // whole=false(ふつう): 再生ヘッドの時刻のポイントを動かす。その時刻にポイントが
 //   無ければ、実際に動かし始めた時に自動で作る(右パネルの数値編集と同じ考え方)。
 // whole=true(Shift+ドラッグ): カメラ全体(全ポイント)をまとめて動かす・回す。
-function beginGizmoDrag(part, point, mx, my, whole) {
-  const cam = scGetSelected();
-  if (!cam) return;
+// particleId を渡すと、カメラではなくパーティクルの位置・向きを動かす
+function beginGizmoDrag(part, point, mx, my, whole, particleId) {
+  const cam = particleId ? null : scGetSelected();
+  if (!cam && !particleId) return;
   const ray = scRayFromScreen(mx, my, fcCanvas.width, fcCanvas.height, fcPos, fcYaw, fcPitch, fcFovDeg);
   point = _clonePose(point);
   dragState = {
-    part, point, camId: cam.id, whole: !!whole, pending: true, startMouse: [mx, my],
+    part, point, camId: cam ? cam.id : null, particleId: particleId || null,
+    whole: !!whole && !particleId, pending: true, startMouse: [mx, my],
     startPos: point.pos.slice(), startYaw: point.yaw, startPitch: point.pitch,
-    startKeys: cam.keys.map(k => _clonePose(k)),
+    startKeys: cam ? cam.keys.map(k => _clonePose(k)) : [],
   };
   if (part.kind === 'axis') {
     dragState.axisDir = _axisVec(part.axis);
@@ -632,6 +638,7 @@ function beginGizmoDrag(part, point, mx, my, whole) {
 // 実際に動き始めた時に、動かす対象(キー)を決める
 function _gizmoDragTarget() {
   const d = dragState;
+  if (d.particleId) { d.pending = false; return pfGet(d.particleId); }
   const cam = scGetCamera(d.camId);
   if (!cam) return null;
   if (d.pending) {
@@ -705,6 +712,10 @@ function applyGizmoDrag(mx, my) {
       point.pitch = Math.max(-limit, Math.min(limit, dragState.startPitch + delta));
     }
   }
+  if (dragState.particleId) {
+    cam.pos = point.pos.slice(); cam.yaw = point.yaw; cam.pitch = point.pitch; // cam = 動かしているパーティクル
+    return;
+  }
   if (dragState.whole) { _applyWholeDelta(cam, point); return; }
   const k = cam.keys[dragState.keyIndex];
   if (k) { k.pos = point.pos.slice(); k.yaw = point.yaw; k.pitch = point.pitch; }
@@ -759,6 +770,11 @@ function onViewportMouseDown(e) {
         const part = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
         if (part) { beginEdit(); beginGizmoDrag(part, active, mx, my, e.shiftKey); return; }
       }
+      const pActive = _particleGizmoPose();
+      if (pActive) {
+        const part = pickTransformGizmoPart(pActive, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
+        if (part) { beginEdit(); beginGizmoDrag(part, pActive, mx, my, false, selectedParticleId); return; }
+      }
       const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
       if (picked) {
         const cam = scGetCamera(picked.camId);
@@ -770,6 +786,12 @@ function onViewportMouseDown(e) {
         } else {
           selectCamera(picked.camId, null, false);
         }
+        return;
+      }
+      const pp = (typeof pfPick === 'function') ? pfPick(mx, my, view, proj, fcCanvas.width, fcCanvas.height) : null;
+      if (pp) {
+        selectParticle(pp.id);
+        if (e.detail >= 2) openEditPanel(pp); // ダブルクリックで設定を開く
         return;
       }
     } catch (err) {
@@ -817,13 +839,15 @@ function onDocMouseMove(e) {
   }
   // マウスが乗っているギズモの部分を光らせる
   if (mouseOverViewport && !pilot && !previewIsMain && e.target === fcCanvas) {
-    const active = scGetActivePoint();
+    const active = scGetActivePoint() || _particleGizmoPose();
+    const hasParticles = typeof particleBlocks !== 'undefined' && particleBlocks.length > 0;
     let hover = null, overCam = false;
-    if (active || sceneCameras.length) {
+    if (active || sceneCameras.length || hasParticles) {
       const [mx, my] = _canvasMouse(e);
       const { view, proj } = _fcEditViewProj();
       if (active) hover = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
-      if (!hover) overCam = !!pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
+      if (!hover) overCam = !!pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null)
+        || (hasParticles && !!pfPick(mx, my, view, proj, fcCanvas.width, fcCanvas.height));
     }
     gizmoHoverPart = hover;
     fcCanvas.style.cursor = hover ? 'grab' : (overCam ? 'pointer' : 'default');
@@ -906,6 +930,10 @@ function currentContextHint() {
     return `ドラッグで見回す+WASDで構図を調整 → ${k} / V・Escで戻る`;
   }
   if (previewIsMain) return '書き出される映像のプレビュー / 右下の小窓クリック、または視点を動かすと編集視点に戻ります';
+  const pSel = (typeof pfGetSelected === 'function') ? pfGetSelected() : null;
+  if (pSel) {
+    return `矢印のドラッグで${pSel.name}を動かす / リングで向きを変える / ダブルクリック: 設定(写真・カケラの形・飛び方) / Delete:削除`;
+  }
   const cam = scGetSelected();
   const active = scGetActivePoint();
   if (cam && active && isNearEye(active.pos)) {
@@ -971,8 +999,10 @@ function renderFreecam() {
   } else {
     drawTerrainWithMatrices(editVP.view, editVP.proj, 0, 0, W, H);
     renderHumanoids(fcGl, editVP.view, editVP.proj, _fcCurTickVal());
+    if (typeof renderParticles === 'function') renderParticles(fcGl, editVP.view, editVP.proj, tick);
     renderCameraGizmos(fcGl, editVP.view, editVP.proj, W, H, { hideCamId: pilot ? pilot.camId : null });
-    const active = scGetActivePoint();
+    if (!pilot && typeof renderParticleGizmos === 'function') renderParticleGizmos(fcGl, editVP.view, editVP.proj, W, H);
+    const active = scGetActivePoint() || _particleGizmoPose();
     if (active && !pilot && !navLook) {
       renderTransformGizmo(fcGl, editVP.view, editVP.proj, active, W, H, dragState ? dragState.part : null);
     }
@@ -990,6 +1020,7 @@ function renderFreecam() {
       const proj = fcMat4Perspective(fcFovDeg * Math.PI / 180, aspect, 0.1, 3000);
       drawTerrainWithMatrices(editVP.view, proj, vx, vy, PINP_W, PINP_H);
       renderHumanoids(fcGl, editVP.view, proj, _fcCurTickVal());
+      if (typeof renderParticles === 'function') renderParticles(fcGl, editVP.view, proj, tick);
       fcGl.disable(fcGl.SCISSOR_TEST);
     } else {
       renderPreviewComposite(fcGl, false, tick);

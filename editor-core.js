@@ -25,6 +25,8 @@ function _editorStateSnapshot() {
     textBlocks: (typeof textBlocks !== 'undefined') ? textBlocks : [],
     nextSceneCameraId: nextSceneCameraId,
     nextTextBlockId: (typeof nextTextBlockId !== 'undefined') ? nextTextBlockId : 1,
+    particleBlocks: (typeof particleBlocks !== 'undefined') ? particleBlocks : [],
+    nextParticleBlockId: (typeof nextParticleBlockId !== 'undefined') ? nextParticleBlockId : 1,
   };
 }
 function _editorStateJson() { return JSON.stringify(_editorStateSnapshot()); }
@@ -34,6 +36,10 @@ function _restoreEditorState(json) {
   sceneCameras = s.sceneCameras;
   nextSceneCameraId = s.nextSceneCameraId;
   if (typeof textBlocks !== 'undefined') { textBlocks = s.textBlocks; nextTextBlockId = s.nextTextBlockId; }
+  if (typeof particleBlocks !== 'undefined') {
+    particleBlocks = s.particleBlocks || []; nextParticleBlockId = s.nextParticleBlockId || 1;
+    if (selectedParticleId != null && !particleBlocks.some(b => b.id === selectedParticleId)) selectedParticleId = null;
+  }
   // 選択中の物が消えていたら選択を外す(残っていれば選択を保つ)
   const cam = scGetSelected();
   if (!cam) { selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false; }
@@ -108,18 +114,28 @@ function selectCamera(id, keyIndex, explicit) {
   selectedKeyIndex = (keyIndex == null) ? scNearestKeyIndex(cam, curTick) : keyIndex;
   selectedKeyExplicit = !!explicit;
   if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
+  if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
   editorChanged();
 }
 
 function selectText(id) {
   selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false;
   selectedTextBlockId = id;
+  if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
+  editorChanged();
+}
+
+function selectParticle(id) {
+  selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false;
+  if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
+  selectedParticleId = id;
   editorChanged();
 }
 
 function clearSelection() {
   selectedCameraId = null; selectedKeyIndex = null; selectedKeyExplicit = false;
   if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
+  if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
   editorChanged();
 }
 
@@ -129,6 +145,7 @@ function getSelectedItem() {
   if (typeof selectedTextBlockId !== 'undefined' && selectedTextBlockId != null) {
     return textBlocks.find(t => t.id === selectedTextBlockId) || null;
   }
+  if (typeof selectedParticleId !== 'undefined' && selectedParticleId != null) return pfGet(selectedParticleId);
   return null;
 }
 
@@ -173,6 +190,14 @@ function deleteSelection() {
     editorChanged();
     return;
   }
+  if (text && text.kind === 'particle') {
+    pushUndo();
+    pfDeleteBlock(text.id);
+    selectedParticleId = null;
+    showToast('🗑 パーティクルを削除しました');
+    editorChanged();
+    return;
+  }
   showToast('削除するものを選んでください');
 }
 
@@ -187,6 +212,9 @@ function splitSelectionAtPlayhead() {
   if (item.kind === 'text') {
     const right = ctSplitTextBlock(item, curTick);
     if (right) selectText(right.id);
+  } else if (item.kind === 'particle') {
+    const right = pfSplitBlock(item, curTick);
+    if (right) selectParticle(right.id);
   } else {
     const right = scSplitCamera(item, curTick);
     if (right) selectCamera(right.id, 0, false);
@@ -201,6 +229,9 @@ function duplicateSelection() {
   if (item.kind === 'text') {
     const dup = ctDuplicateTextBlock(item);
     selectText(dup.id);
+  } else if (item.kind === 'particle') {
+    const dup = pfDuplicateBlock(item);
+    selectParticle(dup.id);
   } else {
     const dup = scDuplicateCamera(item);
     selectCamera(dup.id, 0, false);

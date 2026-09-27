@@ -382,6 +382,7 @@ function updateScrubUI() {
   if (el.innerText !== text) el.innerText = text;
   if (typeof timelineUpdatePlayhead === 'function') timelineUpdatePlayhead();
   if (typeof syncCameraPanelToPlayhead === 'function') syncCameraPanelToPlayhead(false);
+  if (typeof syncParticlePanel === 'function') syncParticlePanel();
 }
 
 function formatSeconds(seconds, withFraction) {
