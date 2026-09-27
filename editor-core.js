@@ -29,6 +29,8 @@ function _editorStateSnapshot() {
     nextParticleBlockId: (typeof nextParticleBlockId !== 'undefined') ? nextParticleBlockId : 1,
     poseBlocks: (typeof poseBlocks !== 'undefined') ? poseBlocks : [],
     nextPoseBlockId: (typeof nextPoseBlockId !== 'undefined') ? nextPoseBlockId : 1,
+    puppets: (typeof puppets !== 'undefined') ? puppets : [],
+    nextPuppetId: (typeof nextPuppetId !== 'undefined') ? nextPuppetId : 1,
   };
 }
 function _editorStateJson() { return JSON.stringify(_editorStateSnapshot()); }
@@ -44,9 +46,11 @@ function _restoreEditorState(json) {
   }
   if (typeof poseBlocks !== 'undefined') {
     poseBlocks = s.poseBlocks || []; nextPoseBlockId = s.nextPoseBlockId || 1;
-    const pb = poseGetSelected();
-    if (selectedPoseId != null && !pb) selectedPoseId = null;
-    if (pb && poseSelKey != null && poseSelKey >= pb.keys.length) poseSelKey = null;
+    puppets = s.puppets || []; nextPuppetId = s.nextPuppetId || 1;
+    if (selectedPoseId != null && !poseGetSelected()) selectedPoseId = null;
+    if (poseExpandedId != null && !poseGet(poseExpandedId)) poseExpandedId = null;
+    poseSelKey = null; poseSelKeyExplicit = false;
+    if (poseEntity && poseEntity.startsWith('puppet:') && !puppetGet(+poseEntity.slice(7))) poseEntity = null;
   }
   // 選択中の物が消えていたら選択を外す(残っていれば選択を保つ)
   const cam = scGetSelected();
@@ -124,6 +128,7 @@ function selectCamera(id, keyIndex, explicit) {
   if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
   if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
   if (typeof selectedPoseId !== 'undefined') selectedPoseId = null;
+  if (typeof setTimelineTab === 'function') setTimelineTab('global');
   editorChanged();
 }
 
@@ -132,6 +137,7 @@ function selectText(id) {
   selectedTextBlockId = id;
   if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
   if (typeof selectedPoseId !== 'undefined') selectedPoseId = null;
+  if (typeof setTimelineTab === 'function') setTimelineTab('global');
   editorChanged();
 }
 
@@ -140,6 +146,7 @@ function selectParticle(id) {
   if (typeof selectedTextBlockId !== 'undefined') selectedTextBlockId = null;
   selectedParticleId = id;
   if (typeof selectedPoseId !== 'undefined') selectedPoseId = null;
+  if (typeof setTimelineTab === 'function') setTimelineTab('global');
   editorChanged();
 }
 
@@ -149,6 +156,8 @@ function selectPose(id) {
   if (typeof selectedParticleId !== 'undefined') selectedParticleId = null;
   if (selectedPoseId !== id) { poseSelKey = null; poseSelKeyExplicit = false; }
   selectedPoseId = id;
+  const pb = poseGet(id);
+  if (pb) { poseEntity = pb.target; setTimelineTab('pose'); }
   editorChanged();
 }
 
@@ -222,9 +231,7 @@ function deleteSelection() {
   }
   if (text && text.kind === 'pose') {
     pushUndo();
-    if (poseSelKeyExplicit && poseSelKey != null && text.keys.length > 1 && text.keys[poseSelKey]) {
-      text.keys.splice(poseSelKey, 1);
-      poseSelKey = null; poseSelKeyExplicit = false;
+    if (poseDeleteSelectedKey()) {
       showToast('◆ キーを削除しました');
     } else {
       poseDeleteBlock(text.id);

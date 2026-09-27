@@ -776,12 +776,13 @@ function onViewportMouseDown(e) {
         const part = pickTransformGizmoPart(active, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
         if (part) { beginEdit(); beginGizmoDrag(part, active, mx, my, e.shiftKey); return; }
       }
-      if (typeof poseMouseDown === 'function' && poseMouseDown(e, mx, my)) return;
       const pActive = _particleGizmoPose();
       if (pActive) {
         const part = pickTransformGizmoPart(pActive, mx, my, view, proj, fcCanvas.width, fcCanvas.height);
         if (part) { beginEdit(); beginGizmoDrag(part, pActive, mx, my, false, selectedParticleId); return; }
       }
+      // エンティティ(プレイヤー・人形)は1回のクリックで選んで、関節を動かせるようにする
+      if (typeof poseMouseDown === 'function' && poseMouseDown(e, mx, my)) return;
       const picked = pickCameraGizmo(mx, my, view, proj, fcCanvas.width, fcCanvas.height, null);
       if (picked) {
         const cam = scGetCamera(picked.camId);

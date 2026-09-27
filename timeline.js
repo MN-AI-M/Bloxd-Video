@@ -163,6 +163,7 @@ function timelineRefresh() {
   if (typeof renderTextTrackBlocks === 'function') renderTextTrackBlocks();
   if (typeof renderParticleTrackBlocks === 'function') renderParticleTrackBlocks();
   if (typeof renderPoseTrackBlocks === 'function') renderPoseTrackBlocks();
+  if (typeof renderTimelineTabs === 'function' && !(document.activeElement && document.activeElement.classList.contains('tlEntitySelect'))) renderTimelineTabs();
   timelineUpdatePlayhead();
   refreshEditPanelIfOpen();
   updateTimelineToolbar();
@@ -505,7 +506,7 @@ function tlSnapCandidates(exclude, includeOwnKeys) {
     for (const b of poseBlocks) {
       const self = exclude && exclude.kind === 'pose' && exclude.id === b.id;
       if (!self) c.push(b.startTick, b.endTick);
-      if (!self || includeOwnKeys) for (const k of b.keys) c.push(b.startTick + (k.time - b.offsetSec) * scTps());
+      if (!self || includeOwnKeys) for (const t of poseKeyTimes(b)) c.push(b.startTick + (t - b.offsetSec) * scTps());
     }
   }
   return c;
@@ -632,6 +633,7 @@ function tlOnMouseMove(e) {
       item.offsetSec = Math.max(0, tlDrag.origOffset + (start - tlDrag.origStart) / tps);
       item.autoLen = false;
     }
+    if (tlDrag.kind === 'pose') item.offsetSec = tlDrag.origOffset + (start - tlDrag.origStart) / tps;
   } else if (tlDrag.mode === 'resize-right') {
     const sn = tlSnap(tlDrag.origEnd + dTicks, cands, e);
     snappedAt = sn.snapped;
